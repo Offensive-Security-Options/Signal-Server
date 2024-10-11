@@ -12,19 +12,29 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectWriter;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
+import io.dropwizard.lifecycle.Managed;
 import io.lettuce.core.RedisException;
+import io.lettuce.core.SetArgs;
 import io.lettuce.core.cluster.api.sync.RedisAdvancedClusterCommands;
+import io.lettuce.core.pubsub.RedisPubSubAdapter;
 import io.micrometer.core.instrument.Metrics;
 import io.micrometer.core.instrument.Tag;
 import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.Timer;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
+import java.security.InvalidKeyException;
+import java.security.Key;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
@@ -35,7 +45,9 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
@@ -43,6 +55,8 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
 import javax.annotation.Nullable;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import org.apache.commons.lang3.ObjectUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.signal.libsignal.protocol.IdentityKey;
@@ -52,13 +66,16 @@ import org.whispersystems.textsecuregcm.auth.SaltedTokenHash;
 import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfiguration;
 import org.whispersystems.textsecuregcm.controllers.MismatchedDevicesException;
 import org.whispersystems.textsecuregcm.entities.AccountAttributes;
+import org.whispersystems.textsecuregcm.entities.DeviceInfo;
 import org.whispersystems.textsecuregcm.entities.ECSignedPreKey;
 import org.whispersystems.textsecuregcm.entities.KEMSignedPreKey;
 import org.whispersystems.textsecuregcm.identity.IdentityType;
 import org.whispersystems.textsecuregcm.identity.ServiceIdentifier;
 import org.whispersystems.textsecuregcm.metrics.UserAgentTagUtil;
 import org.whispersystems.textsecuregcm.push.ClientPresenceManager;
-import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisCluster;
+import org.whispersystems.textsecuregcm.redis.FaultTolerantPubSubConnection;
+import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClusterClient;
+import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClient;
 import org.whispersystems.textsecuregcm.redis.RedisOperation;
 import org.whispersystems.textsecuregcm.securestorage.SecureStorageClient;
 import org.whispersystems.textsecuregcm.securevaluerecovery.SecureValueRecovery2Client;
@@ -71,15 +88,15 @@ import org.whispersystems.textsecuregcm.util.Util;
 import reactor.core.publisher.Flux;
 import reactor.core.scheduler.Scheduler;
 import software.amazon.awssdk.services.dynamodb.model.TransactWriteItem;
+import software.amazon.awssdk.services.dynamodb.model.TransactionCanceledException;
 
-public class AccountsManager {
+public class AccountsManager extends RedisPubSubAdapter<String, String> implements Managed {
 
   private static final Timer createTimer = Metrics.timer(name(AccountsManager.class, "create"));
   private static final Timer updateTimer = Metrics.timer(name(AccountsManager.class, "update"));
   private static final Timer getByNumberTimer = Metrics.timer(name(AccountsManager.class, "getByNumber"));
   private static final Timer getByUsernameHashTimer = Metrics.timer(name(AccountsManager.class, "getByUsernameHash"));
-  private static final Timer getByUsernameLinkHandleTimer = Metrics.timer(
-      name(AccountsManager.class, "getByUsernameLinkHandle"));
+  private static final Timer getByUsernameLinkHandleTimer = Metrics.timer(name(AccountsManager.class, "getByUsernameLinkHandle"));
   private static final Timer getByUuidTimer = Metrics.timer(name(AccountsManager.class, "getByUuid"));
   private static final Timer deleteTimer = Metrics.timer(name(AccountsManager.class, "delete"));
 
@@ -97,7 +114,8 @@ public class AccountsManager {
 
   private final Accounts accounts;
   private final PhoneNumberIdentifiers phoneNumberIdentifiers;
-  private final FaultTolerantRedisCluster cacheCluster;
+  private final FaultTolerantRedisClusterClient cacheCluster;
+  private final FaultTolerantRedisClient pubSubRedisSingleton;
   private final AccountLockManager accountLockManager;
   private final KeysManager keysManager;
   private final MessagesManager messagesManager;
@@ -112,6 +130,18 @@ public class AccountsManager {
   private final Clock clock;
   private final DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager;
 
+  private final Key verificationTokenKey;
+
+  private final FaultTolerantPubSubConnection<String, String> pubSubConnection;
+
+  private final Map<String, CompletableFuture<Optional<DeviceInfo>>> waitForDeviceFuturesByTokenIdentifier =
+      new ConcurrentHashMap<>();
+
+  private static final int SHA256_HASH_LENGTH = getSha256MessageDigest().getDigestLength();
+  private static final Duration RECENTLY_ADDED_DEVICE_TTL = Duration.ofHours(1);
+  private static final String LINKED_DEVICE_PREFIX = "linked_device::";
+  private static final String LINKED_DEVICE_KEYSPACE_PATTERN = "__keyspace@0__:" + LINKED_DEVICE_PREFIX + "*";
+
   private static final ObjectWriter ACCOUNT_REDIS_JSON_WRITER = SystemMapper.jsonMapper()
       .writer(SystemMapper.excludingField(Account.class, List.of("uuid")));
 
@@ -124,6 +154,12 @@ public class AccountsManager {
   private static final Duration USERNAME_HASH_RESERVATION_TTL_MINUTES = Duration.ofMinutes(5);
 
   private static final int MAX_UPDATE_ATTEMPTS = 10;
+
+  @VisibleForTesting
+  static final Duration LINK_DEVICE_TOKEN_EXPIRATION_DURATION = Duration.ofMinutes(10);
+
+  @VisibleForTesting
+  static final String LINK_DEVICE_VERIFICATION_TOKEN_ALGORITHM = "HmacSHA256";
 
   public enum DeletionReason {
     ADMIN_DELETED("admin"),
@@ -139,7 +175,8 @@ public class AccountsManager {
 
   public AccountsManager(final Accounts accounts,
       final PhoneNumberIdentifiers phoneNumberIdentifiers,
-      final FaultTolerantRedisCluster cacheCluster,
+      final FaultTolerantRedisClusterClient cacheCluster,
+      final FaultTolerantRedisClient pubSubRedisSingleton,
       final AccountLockManager accountLockManager,
       final KeysManager keysManager,
       final MessagesManager messagesManager,
@@ -152,10 +189,12 @@ public class AccountsManager {
       final Executor accountLockExecutor,
       final Executor clientPresenceExecutor,
       final Clock clock,
+      final byte[] linkDeviceSecret,
       final DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager) {
     this.accounts = accounts;
     this.phoneNumberIdentifiers = phoneNumberIdentifiers;
     this.cacheCluster = cacheCluster;
+    this.pubSubRedisSingleton = pubSubRedisSingleton;
     this.accountLockManager = accountLockManager;
     this.keysManager = keysManager;
     this.messagesManager = messagesManager;
@@ -169,6 +208,29 @@ public class AccountsManager {
     this.clientPresenceExecutor = clientPresenceExecutor;
     this.clock = requireNonNull(clock);
     this.dynamicConfigurationManager = dynamicConfigurationManager;
+
+    this.verificationTokenKey = new SecretKeySpec(linkDeviceSecret, LINK_DEVICE_VERIFICATION_TOKEN_ALGORITHM);
+
+    // Fail fast: reject bad keys
+    try {
+      getInitializedMac(verificationTokenKey);
+    } catch (final InvalidKeyException e) {
+      throw new IllegalArgumentException(e);
+    }
+
+    this.pubSubConnection = pubSubRedisSingleton.createPubSubConnection();
+  }
+
+  @Override
+  public void start() {
+    pubSubConnection.usePubSubConnection(connection -> connection.addListener(this));
+    pubSubConnection.usePubSubConnection(connection -> connection.sync().psubscribe(LINKED_DEVICE_KEYSPACE_PATTERN));
+  }
+
+  @Override
+  public void stop() {
+    pubSubConnection.usePubSubConnection(connection -> connection.sync().punsubscribe());
+    pubSubConnection.usePubSubConnection(connection -> connection.removeListener(this));
   }
 
   public Account create(final String number,
@@ -275,44 +337,188 @@ public class AccountsManager {
     });
   }
 
-  public CompletableFuture<Pair<Account, Device>> addDevice(final Account account, final DeviceSpec deviceSpec) {
+  public CompletableFuture<Pair<Account, Device>> addDevice(final Account account, final DeviceSpec deviceSpec, final String linkDeviceToken) {
     return accountLockManager.withLockAsync(List.of(account.getNumber()),
-        () -> addDevice(account.getIdentifier(IdentityType.ACI), deviceSpec, MAX_UPDATE_ATTEMPTS),
+        () -> addDevice(account.getIdentifier(IdentityType.ACI), deviceSpec, linkDeviceToken, MAX_UPDATE_ATTEMPTS),
         accountLockExecutor);
   }
 
-  private CompletableFuture<Pair<Account, Device>> addDevice(final UUID accountIdentifier, final DeviceSpec deviceSpec, final int retries) {
+  private CompletableFuture<Pair<Account, Device>> addDevice(final UUID accountIdentifier, final DeviceSpec deviceSpec, final String linkDeviceToken, final int retries) {
     return accounts.getByAccountIdentifierAsync(accountIdentifier)
         .thenApply(maybeAccount -> maybeAccount.orElseThrow(ContestedOptimisticLockException::new))
         .thenCompose(account -> {
           final byte nextDeviceId = account.getNextDeviceId();
+
+          return CompletableFuture.allOf(
+                  keysManager.deleteSingleUsePreKeys(account.getUuid(), nextDeviceId),
+                  keysManager.deleteSingleUsePreKeys(account.getPhoneNumberIdentifier(), nextDeviceId),
+                  messagesManager.clear(account.getUuid(), nextDeviceId))
+              .thenApply(ignored -> new Pair<>(account, nextDeviceId));
+        })
+        .thenCompose(accountAndNextDeviceId -> {
+          final Account account = accountAndNextDeviceId.first();
+          final byte nextDeviceId = accountAndNextDeviceId.second();
+
           account.addDevice(deviceSpec.toDevice(nextDeviceId, clock));
 
-          final List<TransactWriteItem> additionalWriteItems = keysManager.buildWriteItemsForNewDevice(
+          final List<TransactWriteItem> additionalWriteItems = new ArrayList<>(keysManager.buildWriteItemsForNewDevice(
               account.getIdentifier(IdentityType.ACI),
               account.getIdentifier(IdentityType.PNI),
               nextDeviceId,
               deviceSpec.aciSignedPreKey(),
               deviceSpec.pniSignedPreKey(),
               deviceSpec.aciPqLastResortPreKey(),
-              deviceSpec.pniPqLastResortPreKey());
+              deviceSpec.pniPqLastResortPreKey()));
 
-          return CompletableFuture.allOf(
-                  keysManager.deleteSingleUsePreKeys(account.getUuid(), nextDeviceId),
-                  keysManager.deleteSingleUsePreKeys(account.getPhoneNumberIdentifier(), nextDeviceId),
-                  messagesManager.clear(account.getUuid(), nextDeviceId))
-              .thenCompose(ignored -> accounts.updateTransactionallyAsync(account, additionalWriteItems))
+          additionalWriteItems.add(accounts.buildTransactWriteItemForLinkDevice(linkDeviceToken, LINK_DEVICE_TOKEN_EXPIRATION_DURATION));
+
+          return accounts.updateTransactionallyAsync(account, additionalWriteItems)
               .thenApply(ignored -> new Pair<>(account, account.getDevice(nextDeviceId).orElseThrow()));
         })
         .thenCompose(updatedAccountAndDevice -> redisDeleteAsync(updatedAccountAndDevice.first())
             .thenApply(ignored -> updatedAccountAndDevice))
         .exceptionallyCompose(throwable -> {
           if (ExceptionUtils.unwrap(throwable) instanceof ContestedOptimisticLockException && retries > 0) {
-            return addDevice(accountIdentifier, deviceSpec, retries - 1);
+            return addDevice(accountIdentifier, deviceSpec, linkDeviceToken, retries - 1);
+          } else if (ExceptionUtils.unwrap(throwable) instanceof TransactionCanceledException transactionCanceledException) {
+            // We can be confident the transaction was canceled because the linked device token was already used if the
+            // "check token" transaction write item is the only one that failed. That SHOULD be the last one in the
+            // list.
+            final long cancelledTransactions = transactionCanceledException.cancellationReasons().stream()
+                .filter(cancellationReason -> !"None".equals(cancellationReason.code()))
+                .count();
+
+            final boolean tokenReuseConditionFailed =
+                "ConditionalCheckFailed".equals(transactionCanceledException.cancellationReasons().getLast().code());
+
+            if (cancelledTransactions == 1 && tokenReuseConditionFailed) {
+              return CompletableFuture.failedFuture(new LinkDeviceTokenAlreadyUsedException());
+            }
           }
 
           return CompletableFuture.failedFuture(throwable);
+        })
+        .whenComplete((updatedAccountAndDevice, throwable) -> {
+          if (updatedAccountAndDevice != null) {
+            final String key = getLinkedDeviceKey(getLinkDeviceTokenIdentifier(linkDeviceToken));
+            final String deviceInfoJson;
+
+            try {
+              deviceInfoJson = SystemMapper.jsonMapper().writeValueAsString(DeviceInfo.forDevice(updatedAccountAndDevice.second()));
+            } catch (final JsonProcessingException e) {
+              throw new UncheckedIOException(e);
+            }
+
+            pubSubRedisSingleton.withConnection(connection ->
+                connection.async().set(key, deviceInfoJson, SetArgs.Builder.ex(RECENTLY_ADDED_DEVICE_TTL)))
+                .whenComplete((ignored, pubSubThrowable) -> {
+                  if (pubSubThrowable != null) {
+                    logger.warn("Failed to record recently-created device", pubSubThrowable);
+                  }
+                });
+          }
         });
+  }
+
+  private Mac getInitializedMac() {
+    try {
+      return getInitializedMac(verificationTokenKey);
+    } catch (final InvalidKeyException e) {
+      // We checked the key at construction time, so this can never happen
+      throw new AssertionError("Previously valid key now invalid", e);
+    }
+  }
+
+  private static Mac getInitializedMac(final Key linkDeviceTokenKey) throws InvalidKeyException {
+    try {
+      final Mac mac = Mac.getInstance(LINK_DEVICE_VERIFICATION_TOKEN_ALGORITHM);
+      mac.init(linkDeviceTokenKey);
+
+      return mac;
+    } catch (final NoSuchAlgorithmException e) {
+      throw new AssertionError(e);
+    }
+  }
+
+  public String generateLinkDeviceToken(final UUID aci) {
+    final String claims = aci + "." + clock.instant().toEpochMilli();
+    final byte[] signature = getInitializedMac().doFinal(claims.getBytes(StandardCharsets.UTF_8));
+
+    return claims + ":" + Base64.getUrlEncoder().encodeToString(signature);
+  }
+
+  @VisibleForTesting
+  static String generateLinkDeviceToken(final UUID aci, final Key linkDeviceTokenKey, final Clock clock)
+      throws InvalidKeyException {
+
+    final String claims = aci + "." + clock.instant().toEpochMilli();
+    final byte[] signature = getInitializedMac(linkDeviceTokenKey).doFinal(claims.getBytes(StandardCharsets.UTF_8));
+
+    return claims + ":" + Base64.getUrlEncoder().encodeToString(signature);
+  }
+
+  public static String getLinkDeviceTokenIdentifier(final String linkDeviceToken) {
+    return Base64.getUrlEncoder().withoutPadding().encodeToString(
+        getSha256MessageDigest().digest(linkDeviceToken.getBytes(StandardCharsets.UTF_8)));
+  }
+
+  /**
+   * Checks that a device-linking token is valid and returns the account identifier from the token if so, or empty if
+   * the token was invalid
+   *
+   * @param token the device-linking token to check
+   *
+   * @return the account identifier from a valid token or empty if the token was invalid
+   */
+  public Optional<UUID> checkDeviceLinkingToken(final String token) {
+    final String[] claimsAndSignature = token.split(":", 2);
+
+    if (claimsAndSignature.length != 2) {
+      return Optional.empty();
+    }
+
+    final byte[] expectedSignature = getInitializedMac().doFinal(claimsAndSignature[0].getBytes(StandardCharsets.UTF_8));
+    final byte[] providedSignature;
+
+    try {
+      providedSignature = Base64.getUrlDecoder().decode(claimsAndSignature[1]);
+    } catch (final IllegalArgumentException e) {
+      return Optional.empty();
+    }
+
+    if (!MessageDigest.isEqual(expectedSignature, providedSignature)) {
+      return Optional.empty();
+    }
+
+    final String[] aciAndTimestamp = claimsAndSignature[0].split("\\.", 2);
+
+    if (aciAndTimestamp.length != 2) {
+      return Optional.empty();
+    }
+
+    final UUID aci;
+
+    try {
+      aci = UUID.fromString(aciAndTimestamp[0]);
+    } catch (final IllegalArgumentException e) {
+      return Optional.empty();
+    }
+
+    final Instant timestamp;
+
+    try {
+      timestamp = Instant.ofEpochMilli(Long.parseLong(aciAndTimestamp[1]));
+    } catch (final NumberFormatException e) {
+      return Optional.empty();
+    }
+
+    final Instant tokenExpiration = timestamp.plus(LINK_DEVICE_TOKEN_EXPIRATION_DURATION);
+
+    if (tokenExpiration.isBefore(clock.instant())) {
+      return Optional.empty();
+    }
+
+    return Optional.of(aci);
   }
 
   public CompletableFuture<Account> removeDevice(final Account account, final byte deviceId) {
@@ -1004,7 +1210,6 @@ public class AccountsManager {
             keysManager.deleteSingleUsePreKeys(account.getUuid()),
             keysManager.deleteSingleUsePreKeys(account.getPhoneNumberIdentifier()),
             messagesManager.clear(account.getUuid()),
-            messagesManager.clear(account.getPhoneNumberIdentifier()),
             profilesManager.deleteAll(account.getUuid()),
             registrationRecoveryPasswordsManager.removeForNumber(account.getNumber()))
         .thenCompose(ignored -> accounts.delete(account.getUuid(), additionalWriteItems))
@@ -1192,5 +1397,76 @@ public class AccountsManager {
         .toCompletableFuture()
         .whenComplete((ignoredResult, ignoredException) -> sample.stop(redisDeleteTimer))
         .thenRun(Util.NOOP);
+  }
+
+  public CompletableFuture<Optional<DeviceInfo>> waitForNewLinkedDevice(final String linkDeviceTokenIdentifier, final Duration timeout) {
+    // Unbeknownst to callers but beknownst to us, the "link device token identifier" is the base64/url-encoded SHA256
+    // hash of a device-linking token. Before we use the string anywhere, make sure it's the right "shape" for a hash.
+    if (Base64.getUrlDecoder().decode(linkDeviceTokenIdentifier).length != SHA256_HASH_LENGTH) {
+      return CompletableFuture.failedFuture(new IllegalArgumentException("Invalid token identifier"));
+    }
+
+    final CompletableFuture<Optional<DeviceInfo>> waitForDeviceFuture = new CompletableFuture<>();
+
+    waitForDeviceFuture
+        .completeOnTimeout(Optional.empty(), TimeUnit.MILLISECONDS.convert(timeout), TimeUnit.MILLISECONDS)
+        .whenComplete((maybeDevice, throwable) -> waitForDeviceFuturesByTokenIdentifier.compute(linkDeviceTokenIdentifier,
+            (ignored, existingFuture) -> {
+              // Only remove the future from the map if it's THIS future, and not one that later displaced this one
+              return existingFuture == waitForDeviceFuture ? null : existingFuture;
+            }));
+
+    {
+      final CompletableFuture<Optional<DeviceInfo>> displacedFuture =
+          waitForDeviceFuturesByTokenIdentifier.put(linkDeviceTokenIdentifier, waitForDeviceFuture);
+
+      if (displacedFuture != null) {
+        displacedFuture.complete(Optional.empty());
+      }
+    }
+
+    // The device may already have been linked by the time the caller started watching for it; perform an immediate
+    // check to see if the device is already there.
+    pubSubRedisSingleton.withConnection(connection -> connection.async().get(getLinkedDeviceKey(linkDeviceTokenIdentifier)))
+        .thenAccept(response -> {
+          if (StringUtils.isNotBlank(response)) {
+            handleDeviceAdded(waitForDeviceFuture, response);
+          }
+        });
+
+    return waitForDeviceFuture;
+  }
+
+  private static String getLinkedDeviceKey(final String linkDeviceTokenIdentifier) {
+    return LINKED_DEVICE_PREFIX + linkDeviceTokenIdentifier;
+  }
+
+  @Override
+  public void message(final String pattern, final String channel, final String message) {
+    if (LINKED_DEVICE_KEYSPACE_PATTERN.equals(pattern) && "set".equalsIgnoreCase(message)) {
+      // The `- 1` here compensates for the '*' in the pattern
+      final String tokenIdentifier = channel.substring(LINKED_DEVICE_KEYSPACE_PATTERN.length() - 1);
+
+      Optional.ofNullable(waitForDeviceFuturesByTokenIdentifier.remove(tokenIdentifier))
+          .ifPresent(future -> pubSubRedisSingleton.withConnection(connection -> connection.async().get(getLinkedDeviceKey(tokenIdentifier)))
+              .thenAccept(deviceInfoJson -> handleDeviceAdded(future, deviceInfoJson)));
+    }
+  }
+
+  private void handleDeviceAdded(final CompletableFuture<Optional<DeviceInfo>> future, final String deviceInfoJson) {
+    try {
+      future.complete(Optional.of(SystemMapper.jsonMapper().readValue(deviceInfoJson, DeviceInfo.class)));
+    } catch (final JsonProcessingException e) {
+      logger.error("Could not parse device json", e);
+      future.completeExceptionally(e);
+    }
+  }
+
+  private static MessageDigest getSha256MessageDigest() {
+    try {
+      return MessageDigest.getInstance("SHA-256");
+    } catch (final NoSuchAlgorithmException e) {
+      throw new AssertionError("Every implementation of the Java platform is required to support the SHA-256 MessageDigest algorithm", e);
+    }
   }
 }

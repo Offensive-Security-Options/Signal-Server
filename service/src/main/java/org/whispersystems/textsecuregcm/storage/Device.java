@@ -25,7 +25,7 @@ public class Device {
   public static final List<Byte> ALL_POSSIBLE_DEVICE_IDS = IntStream.range(Device.PRIMARY_ID, MAXIMUM_DEVICE_ID).boxed()
       .map(Integer::byteValue).collect(Collectors.toList());
 
-  private static final long ALLOWED_LINKED_IDLE_MILLIS = Duration.ofDays(30).toMillis();
+  private static final long ALLOWED_LINKED_IDLE_MILLIS = Duration.ofDays(45).toMillis();
   private static final long ALLOWED_PRIMARY_IDLE_MILLIS = Duration.ofDays(180).toMillis();
 
   @JsonDeserialize(using = DeviceIdDeserializer.class)
@@ -48,9 +48,6 @@ public class Device {
 
   @JsonProperty
   private String  apnId;
-
-  @JsonProperty
-  private String  voipApnId;
 
   @JsonProperty
   private long pushTimestamp;
@@ -87,14 +84,6 @@ public class Device {
     if (apnId != null) {
       this.pushTimestamp = System.currentTimeMillis();
     }
-  }
-
-  public String getVoipApnId() {
-    return voipApnId;
-  }
-
-  public void setVoipApnId(String voipApnId) {
-    this.voipApnId = voipApnId;
   }
 
   public void setLastSeen(long lastSeen) {
@@ -232,7 +221,7 @@ public class Device {
     return this.userAgent;
   }
 
-  public record DeviceCapabilities(boolean storage, boolean transfer, boolean paymentActivation, boolean deleteSync,
+  public record DeviceCapabilities(boolean storage, boolean transfer, boolean deleteSync,
                                    boolean versionedExpirationTimer) {
   }
 }

@@ -45,8 +45,11 @@ class ExperimentEnrollmentManagerTest {
   private Random random;
 
   private static final UUID ACCOUNT_UUID = UUID.randomUUID();
+  private static final UUID EXCLUDED_UUID = UUID.randomUUID();
   private static final String UUID_EXPERIMENT_NAME = "uuid_test";
+  private static final String E164_AND_UUID_EXPERIMENT_NAME = "e164_uuid_test";
 
+  private static final String NOT_ENROLLED_164 = "+632025551212";
   private static final String ENROLLED_164 = "+12025551212";
   private static final String EXCLUDED_164 = "+18005551212";
   private static final String E164_EXPERIMENT_NAME = "e164_test";
@@ -71,6 +74,10 @@ class ExperimentEnrollmentManagerTest {
         .thenReturn(Optional.of(experimentEnrollmentConfiguration));
     when(dynamicConfiguration.getPreRegistrationEnrollmentConfiguration(E164_EXPERIMENT_NAME))
         .thenReturn(Optional.of(preRegistrationExperimentEnrollmentConfiguration));
+    when(dynamicConfiguration.getExperimentEnrollmentConfiguration(E164_AND_UUID_EXPERIMENT_NAME))
+        .thenReturn(Optional.of(experimentEnrollmentConfiguration));
+    when(dynamicConfiguration.getPreRegistrationEnrollmentConfiguration(E164_AND_UUID_EXPERIMENT_NAME))
+        .thenReturn(Optional.of(preRegistrationExperimentEnrollmentConfiguration));
 
     account = mock(Account.class);
     when(account.getUuid()).thenReturn(ACCOUNT_UUID);
@@ -92,6 +99,12 @@ class ExperimentEnrollmentManagerTest {
 
     when(experimentEnrollmentConfiguration.getEnrollmentPercentage()).thenReturn(100);
     assertTrue(experimentEnrollmentManager.isEnrolled(account.getUuid(), UUID_EXPERIMENT_NAME));
+
+    when(experimentEnrollmentConfiguration.getExcludedUuids()).thenReturn(Set.of(EXCLUDED_UUID));
+    when(experimentEnrollmentConfiguration.getEnrollmentPercentage()).thenReturn(100);
+    when(uuidSelector.getUuidEnrollmentPercentage()).thenReturn(100);
+    when(uuidSelector.getUuids()).thenReturn(Set.of(EXCLUDED_UUID));
+    assertFalse(experimentEnrollmentManager.isEnrolled(EXCLUDED_UUID, UUID_EXPERIMENT_NAME));
   }
 
   @Test
@@ -110,6 +123,29 @@ class ExperimentEnrollmentManagerTest {
         .collect(Collectors.groupingBy(Function.identity(), Collectors.counting()));
     assertEquals(25, counts.get(false));
     assertEquals(75, counts.get(true));
+  }
+
+  @Test
+  void testIsEnrolled_E164AndUuidExperiment() {
+    when(preRegistrationExperimentEnrollmentConfiguration.getIncludedCountryCodes()).thenReturn(Set.of("1"));
+    when(preRegistrationExperimentEnrollmentConfiguration.getEnrollmentPercentage()).thenReturn(0);
+    when(preRegistrationExperimentEnrollmentConfiguration.getEnrolledE164s()).thenReturn(Collections.emptySet());
+    when(preRegistrationExperimentEnrollmentConfiguration.getExcludedE164s()).thenReturn(Collections.emptySet());
+    when(preRegistrationExperimentEnrollmentConfiguration.getExcludedCountryCodes()).thenReturn(Collections.emptySet());
+
+    when(uuidSelector.getUuids()).thenReturn(Set.of(ACCOUNT_UUID));
+    when(uuidSelector.getUuidEnrollmentPercentage()).thenReturn(100);
+    assertTrue(experimentEnrollmentManager.isEnrolled(NOT_ENROLLED_164, account.getUuid(), E164_AND_UUID_EXPERIMENT_NAME));
+    when(uuidSelector.getUuidEnrollmentPercentage()).thenReturn(0);
+    assertFalse(experimentEnrollmentManager.isEnrolled(NOT_ENROLLED_164, account.getUuid(), E164_AND_UUID_EXPERIMENT_NAME));
+    assertFalse(experimentEnrollmentManager.isEnrolled(ENROLLED_164, account.getUuid(), E164_AND_UUID_EXPERIMENT_NAME));
+
+    when(uuidSelector.getUuids()).thenReturn(Collections.emptySet());
+    assertTrue(experimentEnrollmentManager.isEnrolled(ENROLLED_164, account.getUuid(), E164_AND_UUID_EXPERIMENT_NAME));
+    assertFalse(experimentEnrollmentManager.isEnrolled(NOT_ENROLLED_164, account.getUuid(), E164_AND_UUID_EXPERIMENT_NAME));
+    when(preRegistrationExperimentEnrollmentConfiguration.getEnrollmentPercentage()).thenReturn(100);
+    assertTrue(experimentEnrollmentManager.isEnrolled(ENROLLED_164, account.getUuid(), E164_AND_UUID_EXPERIMENT_NAME));
+    assertTrue(experimentEnrollmentManager.isEnrolled(NOT_ENROLLED_164, account.getUuid(), E164_AND_UUID_EXPERIMENT_NAME));
   }
 
   @ParameterizedTest

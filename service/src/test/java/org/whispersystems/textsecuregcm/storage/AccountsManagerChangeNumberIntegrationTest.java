@@ -36,6 +36,7 @@ import org.whispersystems.textsecuregcm.entities.AccountAttributes;
 import org.whispersystems.textsecuregcm.entities.ECSignedPreKey;
 import org.whispersystems.textsecuregcm.identity.IdentityType;
 import org.whispersystems.textsecuregcm.push.ClientPresenceManager;
+import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClient;
 import org.whispersystems.textsecuregcm.redis.RedisClusterExtension;
 import org.whispersystems.textsecuregcm.securestorage.SecureStorageClient;
 import org.whispersystems.textsecuregcm.securevaluerecovery.SecureValueRecovery2Client;
@@ -98,7 +99,8 @@ class AccountsManagerChangeNumberIntegrationTest {
           Tables.NUMBERS.tableName(),
           Tables.PNI_ASSIGNMENTS.tableName(),
           Tables.USERNAMES.tableName(),
-          Tables.DELETED_ACCOUNTS.tableName());
+          Tables.DELETED_ACCOUNTS.tableName(),
+          Tables.USED_LINK_DEVICE_TOKENS.tableName());
 
       accountLockExecutor = Executors.newSingleThreadExecutor();
       clientPresenceExecutor = Executors.newSingleThreadExecutor();
@@ -136,6 +138,7 @@ class AccountsManagerChangeNumberIntegrationTest {
           accounts,
           phoneNumberIdentifiers,
           CACHE_CLUSTER_EXTENSION.getRedisCluster(),
+          mock(FaultTolerantRedisClient.class),
           accountLockManager,
           keysManager,
           messagesManager,
@@ -148,6 +151,7 @@ class AccountsManagerChangeNumberIntegrationTest {
           accountLockExecutor,
           clientPresenceExecutor,
           mock(Clock.class),
+          "link-device-secret".getBytes(StandardCharsets.UTF_8),
           dynamicConfigurationManager);
     }
   }
@@ -194,7 +198,7 @@ class AccountsManagerChangeNumberIntegrationTest {
     final int rotatedPniRegistrationId = 17;
     final ECKeyPair rotatedPniIdentityKeyPair = Curve.generateKeyPair();
     final ECSignedPreKey rotatedSignedPreKey = KeysHelper.signedECPreKey(1L, rotatedPniIdentityKeyPair);
-    final AccountAttributes accountAttributes = new AccountAttributes(true, rotatedPniRegistrationId + 1, rotatedPniRegistrationId, "test".getBytes(StandardCharsets.UTF_8), null, true, new Device.DeviceCapabilities(false, false, false, false, false));
+    final AccountAttributes accountAttributes = new AccountAttributes(true, rotatedPniRegistrationId + 1, rotatedPniRegistrationId, "test".getBytes(StandardCharsets.UTF_8), null, true, new Device.DeviceCapabilities(false, false, false, false));
     final Account account = AccountsHelper.createAccount(accountsManager, originalNumber, accountAttributes);
 
     keysManager.storeEcSignedPreKeys(account.getIdentifier(IdentityType.ACI),

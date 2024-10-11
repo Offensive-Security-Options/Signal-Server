@@ -15,6 +15,7 @@ import javax.validation.Valid;
 import javax.validation.constraints.NotNull;
 import org.whispersystems.textsecuregcm.attachments.TusConfiguration;
 import org.whispersystems.textsecuregcm.configuration.ApnConfiguration;
+import org.whispersystems.textsecuregcm.configuration.AppleAppStoreConfiguration;
 import org.whispersystems.textsecuregcm.configuration.ArtServiceConfiguration;
 import org.whispersystems.textsecuregcm.configuration.AwsAttachmentsConfiguration;
 import org.whispersystems.textsecuregcm.configuration.AwsCredentialsProviderFactory;
@@ -22,7 +23,6 @@ import org.whispersystems.textsecuregcm.configuration.BadgesConfiguration;
 import org.whispersystems.textsecuregcm.configuration.BraintreeConfiguration;
 import org.whispersystems.textsecuregcm.configuration.Cdn3StorageManagerConfiguration;
 import org.whispersystems.textsecuregcm.configuration.CdnConfiguration;
-import org.whispersystems.textsecuregcm.configuration.ClientCdnConfiguration;
 import org.whispersystems.textsecuregcm.configuration.ClientReleaseConfiguration;
 import org.whispersystems.textsecuregcm.configuration.DatadogConfiguration;
 import org.whispersystems.textsecuregcm.configuration.DefaultAwsCredentialsFactory;
@@ -33,6 +33,7 @@ import org.whispersystems.textsecuregcm.configuration.DynamoDbClientFactory;
 import org.whispersystems.textsecuregcm.configuration.DynamoDbTables;
 import org.whispersystems.textsecuregcm.configuration.ExternalRequestFilterConfiguration;
 import org.whispersystems.textsecuregcm.configuration.FaultTolerantRedisClusterFactory;
+import org.whispersystems.textsecuregcm.configuration.FaultTolerantRedisClientFactory;
 import org.whispersystems.textsecuregcm.configuration.FcmConfiguration;
 import org.whispersystems.textsecuregcm.configuration.GcpAttachmentsConfiguration;
 import org.whispersystems.textsecuregcm.configuration.GenericZkConfig;
@@ -46,7 +47,6 @@ import org.whispersystems.textsecuregcm.configuration.MessageCacheConfiguration;
 import org.whispersystems.textsecuregcm.configuration.NoiseWebSocketTunnelConfiguration;
 import org.whispersystems.textsecuregcm.configuration.OneTimeDonationConfiguration;
 import org.whispersystems.textsecuregcm.configuration.PaymentsServiceConfiguration;
-import org.whispersystems.textsecuregcm.configuration.ProvisioningConfiguration;
 import org.whispersystems.textsecuregcm.configuration.RegistrationServiceClientFactory;
 import org.whispersystems.textsecuregcm.configuration.RemoteConfigConfiguration;
 import org.whispersystems.textsecuregcm.configuration.ReportMessageConfiguration;
@@ -97,6 +97,11 @@ public class WhisperServerConfiguration extends Configuration {
   @NotNull
   @Valid
   @JsonProperty
+  private AppleAppStoreConfiguration appleAppStore;
+
+  @NotNull
+  @Valid
+  @JsonProperty
   private DynamoDbClientFactory dynamoDbClient;
 
   @NotNull
@@ -137,7 +142,7 @@ public class WhisperServerConfiguration extends Configuration {
   @NotNull
   @Valid
   @JsonProperty
-  private ProvisioningConfiguration provisioning;
+  private FaultTolerantRedisClientFactory pubsub;
 
   @NotNull
   @Valid
@@ -368,6 +373,10 @@ public class WhisperServerConfiguration extends Configuration {
     return googlePlayBilling;
   }
 
+  public AppleAppStoreConfiguration getAppleAppStore() {
+    return appleAppStore;
+  }
+
   public DynamoDbClientFactory getDynamoDbClientConfiguration() {
     return dynamoDbClient;
   }
@@ -400,8 +409,8 @@ public class WhisperServerConfiguration extends Configuration {
     return cacheCluster;
   }
 
-  public ProvisioningConfiguration getProvisioningConfiguration() {
-    return provisioning;
+  public FaultTolerantRedisClientFactory getRedisPubSubConfiguration() {
+    return pubsub;
   }
 
   public SecureValueRecovery2Configuration getSvr2Configuration() {

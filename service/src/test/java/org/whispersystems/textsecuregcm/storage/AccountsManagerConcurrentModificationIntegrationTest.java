@@ -48,6 +48,7 @@ import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfigurati
 import org.whispersystems.textsecuregcm.entities.AccountAttributes;
 import org.whispersystems.textsecuregcm.identity.IdentityType;
 import org.whispersystems.textsecuregcm.push.ClientPresenceManager;
+import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClient;
 import org.whispersystems.textsecuregcm.securestorage.SecureStorageClient;
 import org.whispersystems.textsecuregcm.securevaluerecovery.SecureValueRecovery2Client;
 import org.whispersystems.textsecuregcm.storage.DynamoDbExtensionSchema.Tables;
@@ -93,7 +94,8 @@ class AccountsManagerConcurrentModificationIntegrationTest {
         Tables.NUMBERS.tableName(),
         Tables.PNI_ASSIGNMENTS.tableName(),
         Tables.USERNAMES.tableName(),
-        Tables.DELETED_ACCOUNTS.tableName());
+        Tables.DELETED_ACCOUNTS.tableName(),
+        Tables.USED_LINK_DEVICE_TOKENS.tableName());
 
     {
       //noinspection unchecked
@@ -123,6 +125,7 @@ class AccountsManagerConcurrentModificationIntegrationTest {
           accounts,
           phoneNumberIdentifiers,
           RedisClusterHelper.builder().stringCommands(commands).build(),
+          mock(FaultTolerantRedisClient.class),
           accountLockManager,
           mock(KeysManager.class),
           mock(MessagesManager.class),
@@ -135,6 +138,7 @@ class AccountsManagerConcurrentModificationIntegrationTest {
           mock(Executor.class),
           mock(Executor.class),
           mock(Clock.class),
+          "link-device-secret".getBytes(StandardCharsets.UTF_8),
           dynamicConfigurationManager
       );
     }
@@ -157,7 +161,7 @@ class AccountsManagerConcurrentModificationIntegrationTest {
                   null,
                   "password",
                   null,
-                  new Device.DeviceCapabilities(false, false, false, false, false),
+                  new Device.DeviceCapabilities(false, false, false, false),
                   1,
                   2,
                   true,

@@ -7,6 +7,7 @@ package org.whispersystems.textsecuregcm.workers;
 
 import static com.codahale.metrics.MetricRegistry.name;
 
+import com.codahale.metrics.MetricRegistry;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import io.dropwizard.core.setup.Environment;
 import io.lettuce.core.resource.ClientResources;
@@ -32,12 +33,14 @@ import org.whispersystems.textsecuregcm.controllers.SecureStorageController;
 import org.whispersystems.textsecuregcm.controllers.SecureValueRecovery2Controller;
 import org.whispersystems.textsecuregcm.experiment.PushNotificationExperimentSamples;
 import org.whispersystems.textsecuregcm.limits.RateLimiters;
+import org.whispersystems.textsecuregcm.metrics.MicrometerAwsSdkMetricPublisher;
 import org.whispersystems.textsecuregcm.push.APNSender;
 import org.whispersystems.textsecuregcm.push.PushNotificationScheduler;
 import org.whispersystems.textsecuregcm.push.ClientPresenceManager;
 import org.whispersystems.textsecuregcm.push.FcmSender;
 import org.whispersystems.textsecuregcm.push.PushNotificationManager;
-import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisCluster;
+import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClusterClient;
+import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClient;
 import org.whispersystems.textsecuregcm.securestorage.SecureStorageClient;
 import org.whispersystems.textsecuregcm.securevaluerecovery.SecureValueRecovery2Client;
 import org.whispersystems.textsecuregcm.storage.AccountLockManager;
@@ -79,8 +82,8 @@ record CommandDependencies(
     FcmSender fcmSender,
     PushNotificationManager pushNotificationManager,
     PushNotificationExperimentSamples pushNotificationExperimentSamples,
-    FaultTolerantRedisCluster cacheCluster,
-    FaultTolerantRedisCluster pushSchedulerCluster,
+    FaultTolerantRedisClusterClient cacheCluster,
+    FaultTolerantRedisClusterClient pushSchedulerCluster,
     ClientResources.Builder redisClusterClientResourcesBuilder,
     BackupManager backupManager,
     DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager,
@@ -106,10 +109,12 @@ record CommandDependencies(
 
     final ClientResources.Builder redisClientResourcesBuilder = ClientResources.builder();
 
-    FaultTolerantRedisCluster cacheCluster = configuration.getCacheClusterConfiguration()
+    FaultTolerantRedisClusterClient cacheCluster = configuration.getCacheClusterConfiguration()
         .build("main_cache", redisClientResourcesBuilder);
-    FaultTolerantRedisCluster pushSchedulerCluster = configuration.getPushSchedulerCluster()
+    FaultTolerantRedisClusterClient pushSchedulerCluster = configuration.getPushSchedulerCluster()
         .build("push_scheduler", redisClientResourcesBuilder);
+    FaultTolerantRedisClient pubsubClient =
+        configuration.getRedisPubSubConfiguration().build("pubsub", redisClientResourcesBuilder.build());
 
     ScheduledExecutorService recurringJobExecutor = environment.lifecycle()
         .scheduledExecutorService(name(name, "recurringJob-%d")).threads(2).build();
@@ -148,11 +153,14 @@ record CommandDependencies(
     ExternalServiceCredentialsGenerator secureValueRecoveryCredentialsGenerator = SecureValueRecovery2Controller.credentialsGenerator(
         configuration.getSvr2Configuration());
 
+    final ExecutorService awsSdkMetricsExecutor = environment.lifecycle()
+        .virtualExecutorService(MetricRegistry.name(CommandDependencies.class, "awsSdkMetrics-%d"));
+
     DynamoDbAsyncClient dynamoDbAsyncClient = configuration.getDynamoDbClientConfiguration()
-        .buildAsyncClient(awsCredentialsProvider);
+        .buildAsyncClient(awsCredentialsProvider, new MicrometerAwsSdkMetricPublisher(awsSdkMetricsExecutor, "dynamoDbAsyncCommand"));
 
     DynamoDbClient dynamoDbClient = configuration.getDynamoDbClientConfiguration()
-        .buildSyncClient(awsCredentialsProvider);
+        .buildSyncClient(awsCredentialsProvider, new MicrometerAwsSdkMetricPublisher(awsSdkMetricsExecutor, "dynamoDbSyncCommand"));
 
     RegistrationRecoveryPasswords registrationRecoveryPasswords = new RegistrationRecoveryPasswords(
         configuration.getDynamoDbTables().getRegistrationRecovery().getTableName(),
@@ -174,7 +182,8 @@ record CommandDependencies(
         configuration.getDynamoDbTables().getAccounts().getPhoneNumberTableName(),
         configuration.getDynamoDbTables().getAccounts().getPhoneNumberIdentifierTableName(),
         configuration.getDynamoDbTables().getAccounts().getUsernamesTableName(),
-        configuration.getDynamoDbTables().getDeletedAccounts().getTableName());
+        configuration.getDynamoDbTables().getDeletedAccounts().getTableName(),
+        configuration.getDynamoDbTables().getAccounts().getUsedLinkDeviceTokensTableName());
     PhoneNumberIdentifiers phoneNumberIdentifiers = new PhoneNumberIdentifiers(dynamoDbClient,
         configuration.getDynamoDbTables().getPhoneNumberIdentifiers().getTableName());
     Profiles profiles = new Profiles(dynamoDbClient, dynamoDbAsyncClient,
@@ -190,11 +199,11 @@ record CommandDependencies(
         configuration.getDynamoDbTables().getMessages().getTableName(),
         configuration.getDynamoDbTables().getMessages().getExpiration(),
         messageDeletionExecutor);
-    FaultTolerantRedisCluster messagesCluster = configuration.getMessageCacheConfiguration()
+    FaultTolerantRedisClusterClient messagesCluster = configuration.getMessageCacheConfiguration()
         .getRedisClusterConfiguration().build("messages", redisClientResourcesBuilder);
-    FaultTolerantRedisCluster clientPresenceCluster = configuration.getClientPresenceClusterConfiguration()
+    FaultTolerantRedisClusterClient clientPresenceCluster = configuration.getClientPresenceClusterConfiguration()
         .build("client_presence", redisClientResourcesBuilder);
-    FaultTolerantRedisCluster rateLimitersCluster = configuration.getRateLimitersCluster().build("rate_limiters",
+    FaultTolerantRedisClusterClient rateLimitersCluster = configuration.getRateLimitersCluster().build("rate_limiters",
         redisClientResourcesBuilder);
     SecureValueRecovery2Client secureValueRecovery2Client = new SecureValueRecovery2Client(
         secureValueRecoveryCredentialsGenerator, secureValueRecoveryServiceExecutor,
@@ -219,10 +228,10 @@ record CommandDependencies(
     ClientPublicKeysManager clientPublicKeysManager =
         new ClientPublicKeysManager(clientPublicKeys, accountLockManager, accountLockExecutor);
     AccountsManager accountsManager = new AccountsManager(accounts, phoneNumberIdentifiers, cacheCluster,
-        accountLockManager, keys, messagesManager, profilesManager,
+        pubsubClient, accountLockManager, keys, messagesManager, profilesManager,
         secureStorageClient, secureValueRecovery2Client, clientPresenceManager,
         registrationRecoveryPasswordsManager, clientPublicKeysManager, accountLockExecutor, clientPresenceExecutor,
-        clock, dynamicConfigurationManager);
+        clock, configuration.getLinkDeviceSecretConfiguration().secret().value(), dynamicConfigurationManager);
     RateLimiters rateLimiters = RateLimiters.createAndValidate(configuration.getLimitsConfiguration(),
         dynamicConfigurationManager, rateLimitersCluster);
     final BackupsDb backupsDb =

@@ -11,7 +11,7 @@ import java.time.Duration;
 import java.util.Map;
 import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfiguration;
 import org.whispersystems.textsecuregcm.redis.ClusterLuaScript;
-import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisCluster;
+import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClusterClient;
 import org.whispersystems.textsecuregcm.storage.DynamicConfigurationManager;
 
 public class RateLimiters extends BaseRateLimiters<RateLimiters.For> {
@@ -50,6 +50,7 @@ public class RateLimiters extends BaseRateLimiters<RateLimiters.For> {
     EXTERNAL_SERVICE_CREDENTIALS("externalServiceCredentials", true, new RateLimiterConfig(100, Duration.ofMinutes(15))),
     KEY_TRANSPARENCY_SEARCH_PER_IP("keyTransparencySearch", true, new RateLimiterConfig(100, Duration.ofSeconds(15))),
     KEY_TRANSPARENCY_MONITOR_PER_IP("keyTransparencyMonitor", true, new RateLimiterConfig(100, Duration.ofSeconds(15))),
+    WAIT_FOR_LINKED_DEVICE("waitForLinkedDevice", true, new RateLimiterConfig(10, Duration.ofSeconds(30))),
     ;
 
     private final String id;
@@ -81,7 +82,7 @@ public class RateLimiters extends BaseRateLimiters<RateLimiters.For> {
   public static RateLimiters createAndValidate(
       final Map<String, RateLimiterConfig> configs,
       final DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager,
-      final FaultTolerantRedisCluster cacheCluster) {
+      final FaultTolerantRedisClusterClient cacheCluster) {
     final RateLimiters rateLimiters = new RateLimiters(
         configs, dynamicConfigurationManager, defaultScript(cacheCluster), cacheCluster, Clock.systemUTC());
     rateLimiters.validateValuesAndConfigs();
@@ -93,7 +94,7 @@ public class RateLimiters extends BaseRateLimiters<RateLimiters.For> {
       final Map<String, RateLimiterConfig> configs,
       final DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager,
       final ClusterLuaScript validateScript,
-      final FaultTolerantRedisCluster cacheCluster,
+      final FaultTolerantRedisClusterClient cacheCluster,
       final Clock clock) {
     super(For.values(), configs, dynamicConfigurationManager, validateScript, cacheCluster, clock);
   }
@@ -204,5 +205,9 @@ public class RateLimiters extends BaseRateLimiters<RateLimiters.For> {
 
   public RateLimiter getStoriesLimiter() {
     return forDescriptor(For.STORIES);
+  }
+
+  public RateLimiter getWaitForLinkedDeviceLimiter() {
+    return forDescriptor(For.WAIT_FOR_LINKED_DEVICE);
   }
 }

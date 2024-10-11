@@ -7,33 +7,30 @@ package org.whispersystems.textsecuregcm.controllers;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.net.HttpHeaders;
 import io.dropwizard.auth.Auth;
-import io.lettuce.core.SetArgs;
+import io.lettuce.core.RedisException;
+import io.micrometer.core.instrument.Metrics;
+import io.micrometer.core.instrument.Tags;
+import io.micrometer.core.instrument.Timer;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.headers.Header;
+import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
-import io.swagger.v3.oas.annotations.tags.Tag;
-import java.nio.charset.StandardCharsets;
-import java.security.InvalidKeyException;
-import java.security.Key;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.time.Clock;
 import java.time.Duration;
-import java.time.Instant;
-import java.util.Base64;
-import java.util.LinkedList;
+import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
-import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.atomic.AtomicInteger;
 import javax.annotation.Nullable;
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import javax.validation.Valid;
+import javax.validation.constraints.Max;
+import javax.validation.constraints.Min;
 import javax.validation.constraints.NotNull;
+import javax.validation.constraints.Size;
 import javax.ws.rs.Consumes;
 import javax.ws.rs.DELETE;
+import javax.ws.rs.DefaultValue;
 import javax.ws.rs.ForbiddenException;
 import javax.ws.rs.GET;
 import javax.ws.rs.HeaderParam;
@@ -41,10 +38,12 @@ import javax.ws.rs.PUT;
 import javax.ws.rs.Path;
 import javax.ws.rs.PathParam;
 import javax.ws.rs.Produces;
+import javax.ws.rs.QueryParam;
 import javax.ws.rs.WebApplicationException;
 import javax.ws.rs.core.Context;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import org.glassfish.jersey.server.ContainerRequest;
 import org.whispersystems.textsecuregcm.auth.LinkedDeviceRefreshRequirementProvider;
 import org.whispersystems.textsecuregcm.auth.AuthenticatedDevice;
@@ -57,17 +56,25 @@ import org.whispersystems.textsecuregcm.entities.DeviceInfoList;
 import org.whispersystems.textsecuregcm.entities.DeviceResponse;
 import org.whispersystems.textsecuregcm.entities.LinkDeviceRequest;
 import org.whispersystems.textsecuregcm.entities.PreKeySignatureValidator;
+import org.whispersystems.textsecuregcm.entities.ProvisioningMessage;
 import org.whispersystems.textsecuregcm.entities.SetPublicKeyRequest;
 import org.whispersystems.textsecuregcm.identity.IdentityType;
 import org.whispersystems.textsecuregcm.limits.RateLimiters;
-import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisCluster;
+import org.whispersystems.textsecuregcm.metrics.MetricsUtil;
+import org.whispersystems.textsecuregcm.metrics.UserAgentTagUtil;
 import org.whispersystems.textsecuregcm.storage.Account;
 import org.whispersystems.textsecuregcm.storage.AccountsManager;
 import org.whispersystems.textsecuregcm.storage.ClientPublicKeysManager;
 import org.whispersystems.textsecuregcm.storage.Device;
 import org.whispersystems.textsecuregcm.storage.Device.DeviceCapabilities;
 import org.whispersystems.textsecuregcm.storage.DeviceSpec;
-import org.whispersystems.textsecuregcm.util.VerificationCode;
+import org.whispersystems.textsecuregcm.storage.LinkDeviceTokenAlreadyUsedException;
+import org.whispersystems.textsecuregcm.util.EnumMapUtil;
+import org.whispersystems.textsecuregcm.util.ExceptionUtils;
+import org.whispersystems.textsecuregcm.util.LinkDeviceToken;
+import org.whispersystems.textsecuregcm.util.ua.ClientPlatform;
+import org.whispersystems.textsecuregcm.util.ua.UnrecognizedUserAgentException;
+import org.whispersystems.textsecuregcm.util.ua.UserAgentUtil;
 import org.whispersystems.websocket.auth.Mutable;
 import org.whispersystems.websocket.auth.ReadOnly;
 
@@ -77,56 +84,54 @@ public class DeviceController {
 
   static final int MAX_DEVICES = 6;
 
-  private final Key verificationTokenKey;
   private final AccountsManager accounts;
   private final ClientPublicKeysManager clientPublicKeysManager;
   private final RateLimiters rateLimiters;
-  private final FaultTolerantRedisCluster usedTokenCluster;
   private final Map<String, Integer> maxDeviceConfiguration;
 
-  private final Clock clock;
+  private final EnumMap<ClientPlatform, AtomicInteger> linkedDeviceListenersByPlatform;
+  private final AtomicInteger linkedDeviceListenersForUnrecognizedPlatforms;
 
-  private static final String VERIFICATION_TOKEN_ALGORITHM = "HmacSHA256";
+  private static final String LINKED_DEVICE_LISTENER_GAUGE_NAME =
+      MetricsUtil.name(DeviceController.class, "linkedDeviceListeners");
+
+  private static final String WAIT_FOR_LINKED_DEVICE_TIMER_NAME =
+      MetricsUtil.name(DeviceController.class, "waitForLinkedDeviceDuration");
 
   @VisibleForTesting
-  static final Duration TOKEN_EXPIRATION_DURATION = Duration.ofMinutes(10);
+  static final int MIN_TOKEN_IDENTIFIER_LENGTH = 32;
 
-  public DeviceController(byte[] linkDeviceSecret,
-      AccountsManager accounts,
-      ClientPublicKeysManager clientPublicKeysManager,
-      RateLimiters rateLimiters,
-      FaultTolerantRedisCluster usedTokenCluster,
-      Map<String, Integer> maxDeviceConfiguration, final Clock clock) {
-    this.verificationTokenKey = new SecretKeySpec(linkDeviceSecret, VERIFICATION_TOKEN_ALGORITHM);
+  @VisibleForTesting
+  static final int MAX_TOKEN_IDENTIFIER_LENGTH = 64;
+
+  public DeviceController(final AccountsManager accounts,
+      final ClientPublicKeysManager clientPublicKeysManager,
+      final RateLimiters rateLimiters,
+      final Map<String, Integer> maxDeviceConfiguration) {
+
     this.accounts = accounts;
     this.clientPublicKeysManager = clientPublicKeysManager;
     this.rateLimiters = rateLimiters;
-    this.usedTokenCluster = usedTokenCluster;
     this.maxDeviceConfiguration = maxDeviceConfiguration;
-    this.clock = clock;
 
-    // Fail fast: reject bad keys
-    try {
-      final Mac mac = Mac.getInstance(VERIFICATION_TOKEN_ALGORITHM);
-      mac.init(verificationTokenKey);
-    } catch (final NoSuchAlgorithmException e) {
-      throw new AssertionError("All Java implementations must support HmacSHA256", e);
-    } catch (final InvalidKeyException e) {
-      throw new IllegalArgumentException(e);
-    }
+    linkedDeviceListenersByPlatform =
+        EnumMapUtil.toEnumMap(ClientPlatform.class, clientPlatform -> buildGauge(clientPlatform.name().toLowerCase()));
+
+    linkedDeviceListenersForUnrecognizedPlatforms = buildGauge("unknown");
+  }
+
+  private static AtomicInteger buildGauge(final String clientPlatformName) {
+    return Metrics.gauge(LINKED_DEVICE_LISTENER_GAUGE_NAME,
+        Tags.of(io.micrometer.core.instrument.Tag.of(UserAgentTagUtil.PLATFORM_TAG, clientPlatformName)),
+        new AtomicInteger(0));
   }
 
   @GET
   @Produces(MediaType.APPLICATION_JSON)
   public DeviceInfoList getDevices(@ReadOnly @Auth AuthenticatedDevice auth) {
-    List<DeviceInfo> devices = new LinkedList<>();
-
-    for (Device device : auth.getAccount().getDevices()) {
-      devices.add(new DeviceInfo(device.getId(), device.getName(),
-          device.getLastSeen(), device.getCreated()));
-    }
-
-    return new DeviceInfoList(devices);
+    return new DeviceInfoList(auth.getAccount().getDevices().stream()
+        .map(DeviceInfo::forDevice)
+        .toList());
   }
 
   @DELETE
@@ -146,10 +151,35 @@ public class DeviceController {
     accounts.removeDevice(auth.getAccount(), deviceId).join();
   }
 
+  /**
+   * Generates a signed device-linking token. Generally, primary devices will include the signed device-linking token in
+   * a provisioning message to a new device, and then the new device will include the token in its request to
+   * {@link #linkDevice(BasicAuthorizationHeader, String, LinkDeviceRequest, ContainerRequest)}.
+   *
+   * @param auth the authenticated account/device
+   *
+   * @return a signed device-linking token
+   *
+   * @throws RateLimitExceededException if the caller has made too many calls to this method in a set amount of time
+   * @throws DeviceLimitExceededException if the authenticated account has already reached the maximum number of linked
+   * devices
+   *
+   * @see ProvisioningController#sendProvisioningMessage(AuthenticatedDevice, String, ProvisioningMessage, String)
+   */
   @GET
   @Path("/provisioning/code")
   @Produces(MediaType.APPLICATION_JSON)
-  public VerificationCode createDeviceToken(@ReadOnly @Auth AuthenticatedDevice auth)
+  @Operation(
+      summary = "Generate a signed device-linking token",
+      description = """
+          Generate a signed device-linking token for transmission to a pending linked device via a provisioning message.
+          """)
+  @ApiResponse(responseCode="200", description="Token was generated successfully", useReturnTypeSchema=true)
+  @ApiResponse(responseCode = "411", description = "The authenticated account already has the maximum allowed number of linked devices")
+  @ApiResponse(responseCode = "429", description = "Too many attempts", headers = @Header(
+      name = "Retry-After",
+      description = "If present, an positive integer indicating the number of seconds before a subsequent attempt could succeed"))
+  public LinkDeviceToken createDeviceToken(@ReadOnly @Auth AuthenticatedDevice auth)
       throws RateLimitExceededException, DeviceLimitExceededException {
 
     final Account account = auth.getAccount();
@@ -170,7 +200,9 @@ public class DeviceController {
       throw new WebApplicationException(Response.Status.UNAUTHORIZED);
     }
 
-    return new VerificationCode(generateVerificationToken(account.getUuid()));
+    final String token = accounts.generateLinkDeviceToken(account.getUuid());
+
+    return new LinkDeviceToken(token, AccountsManager.getLinkDeviceTokenIdentifier(token));
   }
 
   @PUT
@@ -196,7 +228,7 @@ public class DeviceController {
       @Context ContainerRequest containerRequest)
       throws RateLimitExceededException, DeviceLimitExceededException {
 
-    final Account account = checkVerificationToken(linkDeviceRequest.verificationCode())
+    final Account account = accounts.checkDeviceLinkingToken(linkDeviceRequest.verificationCode())
         .flatMap(accounts::getByAccountIdentifier)
         .orElseThrow(ForbiddenException::new);
 
@@ -248,27 +280,110 @@ public class DeviceController {
       signalAgent = "OWD";
     }
 
-    return accounts.addDevice(account, new DeviceSpec(accountAttributes.getName(),
-            authorizationHeader.getPassword(),
-            signalAgent,
-            capabilities,
-            accountAttributes.getRegistrationId(),
-            accountAttributes.getPhoneNumberIdentityRegistrationId(),
-            accountAttributes.getFetchesMessages(),
-            deviceActivationRequest.apnToken(),
-            deviceActivationRequest.gcmToken(),
-            deviceActivationRequest.aciSignedPreKey(),
-            deviceActivationRequest.pniSignedPreKey(),
-            deviceActivationRequest.aciPqLastResortPreKey(),
-            deviceActivationRequest.pniPqLastResortPreKey()))
-        .thenCompose(a -> usedTokenCluster.withCluster(connection -> connection.async()
-                .set(getUsedTokenKey(linkDeviceRequest.verificationCode()), "", new SetArgs().ex(TOKEN_EXPIRATION_DURATION)))
-            .thenApply(ignored -> a))
-        .thenApply(accountAndDevice -> new DeviceResponse(
-            accountAndDevice.first().getIdentifier(IdentityType.ACI),
-            accountAndDevice.first().getIdentifier(IdentityType.PNI),
-            accountAndDevice.second().getId()))
-        .join();
+    try {
+      return accounts.addDevice(account, new DeviceSpec(accountAttributes.getName(),
+                  authorizationHeader.getPassword(),
+                  signalAgent,
+                  capabilities,
+                  accountAttributes.getRegistrationId(),
+                  accountAttributes.getPhoneNumberIdentityRegistrationId(),
+                  accountAttributes.getFetchesMessages(),
+                  deviceActivationRequest.apnToken(),
+                  deviceActivationRequest.gcmToken(),
+                  deviceActivationRequest.aciSignedPreKey(),
+                  deviceActivationRequest.pniSignedPreKey(),
+                  deviceActivationRequest.aciPqLastResortPreKey(),
+                  deviceActivationRequest.pniPqLastResortPreKey()),
+              linkDeviceRequest.verificationCode())
+          .thenApply(accountAndDevice -> new DeviceResponse(
+              accountAndDevice.first().getIdentifier(IdentityType.ACI),
+              accountAndDevice.first().getIdentifier(IdentityType.PNI),
+              accountAndDevice.second().getId()))
+          .join();
+    } catch (final CompletionException e) {
+      if (e.getCause() instanceof LinkDeviceTokenAlreadyUsedException) {
+        throw new ForbiddenException();
+      }
+
+      throw e;
+    }
+  }
+
+  @GET
+  @Path("/wait_for_linked_device/{tokenIdentifier}")
+  @Produces(MediaType.APPLICATION_JSON)
+  @Operation(summary = "Wait for a new device to be linked to an account",
+      description = """
+          Waits for a new device to be linked to an account and returns basic information about the new device when
+          available.
+          """)
+  @ApiResponse(responseCode = "200", description = "The specified was linked to an account")
+  @ApiResponse(responseCode = "204", description = "No device was linked to the account before the call completed")
+  @ApiResponse(responseCode = "400", description = "The given token identifier or timeout was invalid")
+  @ApiResponse(responseCode = "429", description = "Rate-limited; try again after the prescribed delay")
+  @Schema(description = "Basic information about the linked device", implementation = DeviceInfo.class)
+  public CompletableFuture<Response> waitForLinkedDevice(
+      @ReadOnly @Auth final AuthenticatedDevice authenticatedDevice,
+
+      @PathParam("tokenIdentifier")
+      @Schema(description = "A 'link device' token identifier provided by the 'create link device token' endpoint")
+      @Size(min = MIN_TOKEN_IDENTIFIER_LENGTH, max = MAX_TOKEN_IDENTIFIER_LENGTH)
+      final String tokenIdentifier,
+
+      @QueryParam("timeout")
+      @DefaultValue("30")
+      @Min(1)
+      @Max(3600)
+      @Schema(requiredMode = Schema.RequiredMode.NOT_REQUIRED,
+          minimum = "1",
+          maximum = "3600",
+          description = """
+                The amount of time (in seconds) to wait for a response. If the expected device is not linked within the
+                given amount of time, this endpoint will return a status of HTTP/204.
+              """) final int timeoutSeconds,
+
+      @HeaderParam(HttpHeaders.USER_AGENT) String userAgent) throws RateLimitExceededException {
+
+    rateLimiters.getWaitForLinkedDeviceLimiter().validate(authenticatedDevice.getAccount().getIdentifier(IdentityType.ACI));
+
+    final AtomicInteger linkedDeviceListenerCounter = getCounterForLinkedDeviceListeners(userAgent);
+    linkedDeviceListenerCounter.incrementAndGet();
+
+    final Timer.Sample sample = Timer.start();
+
+    try {
+      return accounts.waitForNewLinkedDevice(tokenIdentifier, Duration.ofSeconds(timeoutSeconds))
+          .thenApply(maybeDeviceInfo -> maybeDeviceInfo
+              .map(deviceInfo -> Response.status(Response.Status.OK).entity(deviceInfo).build())
+              .orElseGet(() -> Response.status(Response.Status.NO_CONTENT).build()))
+          .exceptionally(ExceptionUtils.exceptionallyHandler(IllegalArgumentException.class,
+              e -> Response.status(Response.Status.BAD_REQUEST).build()))
+          .whenComplete((response, throwable) -> {
+            linkedDeviceListenerCounter.decrementAndGet();
+
+            if (response != null) {
+              sample.stop(Timer.builder(WAIT_FOR_LINKED_DEVICE_TIMER_NAME)
+                  .publishPercentileHistogram(true)
+                  .tags(Tags.of(UserAgentTagUtil.getPlatformTag(userAgent),
+                      io.micrometer.core.instrument.Tag.of("deviceFound",
+                          String.valueOf(response.getStatus() == Response.Status.OK.getStatusCode()))))
+                  .register(Metrics.globalRegistry));
+            }
+          });
+    } catch (final RedisException e) {
+      // `waitForNewLinkedDevice` could fail synchronously if the Redis circuit breaker is open; prevent counter drift
+      // if that happens
+      linkedDeviceListenerCounter.decrementAndGet();
+      throw e;
+    }
+  }
+
+  private AtomicInteger getCounterForLinkedDeviceListeners(final String userAgent) {
+    try {
+      return linkedDeviceListenersByPlatform.get(UserAgentUtil.parseUserAgentString(userAgent).getPlatform());
+    } catch (final UnrecognizedUserAgentException ignored) {
+      return linkedDeviceListenersForUnrecognizedPlatforms;
+    }
   }
 
   @PUT
@@ -310,95 +425,10 @@ public class DeviceController {
         setPublicKeyRequest.publicKey());
   }
 
-  private Mac getInitializedMac() {
-    try {
-      final Mac mac = Mac.getInstance(VERIFICATION_TOKEN_ALGORITHM);
-      mac.init(verificationTokenKey);
-
-      return mac;
-    } catch (final NoSuchAlgorithmException | InvalidKeyException e) {
-      // All Java implementations must support HmacSHA256 and we checked the key at construction time, so this can never
-      // happen
-      throw new AssertionError(e);
-    }
-  }
-
-  @VisibleForTesting
-  String generateVerificationToken(final UUID aci) {
-    final String claims = aci + "." + clock.instant().toEpochMilli();
-    final byte[] signature = getInitializedMac().doFinal(claims.getBytes(StandardCharsets.UTF_8));
-
-    return claims + ":" + Base64.getUrlEncoder().encodeToString(signature);
-  }
-
-  @VisibleForTesting
-  Optional<UUID> checkVerificationToken(final String verificationToken) {
-    final boolean tokenUsed = usedTokenCluster.withCluster(connection ->
-        connection.sync().get(getUsedTokenKey(verificationToken)) != null);
-
-    if (tokenUsed) {
-      return Optional.empty();
-    }
-
-    final String[] claimsAndSignature = verificationToken.split(":", 2);
-
-    if (claimsAndSignature.length != 2) {
-      return Optional.empty();
-    }
-
-    final byte[] expectedSignature = getInitializedMac().doFinal(
-        claimsAndSignature[0].getBytes(StandardCharsets.UTF_8));
-    final byte[] providedSignature;
-
-    try {
-      providedSignature = Base64.getUrlDecoder().decode(claimsAndSignature[1]);
-    } catch (final IllegalArgumentException e) {
-      return Optional.empty();
-    }
-
-    if (!MessageDigest.isEqual(expectedSignature, providedSignature)) {
-      return Optional.empty();
-    }
-
-    final String[] aciAndTimestamp = claimsAndSignature[0].split("\\.", 2);
-
-    if (aciAndTimestamp.length != 2) {
-      return Optional.empty();
-    }
-
-    final UUID aci;
-
-    try {
-      aci = UUID.fromString(aciAndTimestamp[0]);
-    } catch (final IllegalArgumentException e) {
-      return Optional.empty();
-    }
-
-    final Instant timestamp;
-
-    try {
-      timestamp = Instant.ofEpochMilli(Long.parseLong(aciAndTimestamp[1]));
-    } catch (final NumberFormatException e) {
-      return Optional.empty();
-    }
-
-    final Instant tokenExpiration = timestamp.plus(TOKEN_EXPIRATION_DURATION);
-
-    if (tokenExpiration.isBefore(clock.instant())) {
-      return Optional.empty();
-    }
-
-    return Optional.of(aci);
-  }
-
   private static boolean isCapabilityDowngrade(Account account, DeviceCapabilities capabilities) {
     boolean isDowngrade = false;
     isDowngrade |= account.isDeleteSyncSupported() && !capabilities.deleteSync();
     isDowngrade |= account.isVersionedExpirationTimerSupported() && !capabilities.versionedExpirationTimer();
     return isDowngrade;
-  }
-
-  private static String getUsedTokenKey(final String token) {
-    return "usedToken::" + token;
   }
 }

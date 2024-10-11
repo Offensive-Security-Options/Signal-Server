@@ -81,6 +81,18 @@ googlePlayBilling:
   applicationName: test
   productIdToLevel: {}
 
+appleAppStore:
+  env: SANDBOX
+  bundleId: bundle.name
+  appAppleId: 12345
+  issuerId: abcdefg
+  keyId: abcdefg
+  encodedKey: secret://appleAppStore.encodedKey
+  subscriptionGroupId: example_subscriptionGroupId
+  productIdToLevel: {}
+  appleRootCerts: []
+
+
 dynamoDbClient:
   region: us-west-2 # AWS Region
 
@@ -90,6 +102,7 @@ dynamoDbTables:
     phoneNumberTableName: Example_Accounts_PhoneNumbers
     phoneNumberIdentifierTableName: Example_Accounts_PhoneNumberIdentifiers
     usernamesTableName: Example_Accounts_Usernames
+    usedLinkDeviceTokensTableName: Example_Accounts_UsedLinkDeviceTokens
   backups:
     tableName: Example_Backups
   clientReleases:
@@ -150,9 +163,8 @@ cacheCluster: # Redis server configuration for cache cluster
 clientPresenceCluster: # Redis server configuration for client presence cluster
   configurationUri: redis://redis.example.com:6379/
 
-provisioning:
-  pubsub: # Redis server configuration for pubsub cluster
-    uri: redis://redis.example.com:6379/
+pubsub: # Redis server configuration for pubsub cluster
+  uri: redis://redis.example.com:6379/
 
 pushSchedulerCluster: # Redis server configuration for push scheduler cluster
   configurationUri: redis://redis.example.com:6379/

@@ -50,8 +50,8 @@ import org.whispersystems.textsecuregcm.entities.MessageProtos;
 import org.whispersystems.textsecuregcm.experiment.Experiment;
 import org.whispersystems.textsecuregcm.identity.ServiceIdentifier;
 import org.whispersystems.textsecuregcm.metrics.MetricsUtil;
-import org.whispersystems.textsecuregcm.redis.FaultTolerantPubSubConnection;
-import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisCluster;
+import org.whispersystems.textsecuregcm.redis.FaultTolerantPubSubClusterConnection;
+import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClusterClient;
 import org.whispersystems.textsecuregcm.util.Pair;
 import org.whispersystems.textsecuregcm.util.RedisClusterUtil;
 import org.whispersystems.textsecuregcm.util.Util;
@@ -119,8 +119,8 @@ import reactor.core.scheduler.Schedulers;
  */
 public class MessagesCache extends RedisClusterPubSubAdapter<String, String> implements Managed {
 
-  private final FaultTolerantRedisCluster redisCluster;
-  private final FaultTolerantPubSubConnection<String, String> pubSubConnection;
+  private final FaultTolerantRedisClusterClient redisCluster;
+  private final FaultTolerantPubSubClusterConnection<String, String> pubSubConnection;
   private final Clock clock;
 
   private final ExecutorService notificationExecutorService;
@@ -183,9 +183,9 @@ public class MessagesCache extends RedisClusterPubSubAdapter<String, String> imp
 
   private static final Logger logger = LoggerFactory.getLogger(MessagesCache.class);
 
-  public MessagesCache(final FaultTolerantRedisCluster redisCluster, final ExecutorService notificationExecutorService,
-      final Scheduler messageDeliveryScheduler, final ExecutorService messageDeletionExecutorService, final Clock clock,
-      final DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager)
+  public MessagesCache(final FaultTolerantRedisClusterClient redisCluster, final ExecutorService notificationExecutorService,
+                       final Scheduler messageDeliveryScheduler, final ExecutorService messageDeletionExecutorService, final Clock clock,
+                       final DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager)
       throws IOException {
     this(
         redisCluster,
@@ -205,15 +205,15 @@ public class MessagesCache extends RedisClusterPubSubAdapter<String, String> imp
   }
 
   @VisibleForTesting
-  MessagesCache(final FaultTolerantRedisCluster redisCluster, final ExecutorService notificationExecutorService,
-      final Scheduler messageDeliveryScheduler, final ExecutorService messageDeletionExecutorService, final Clock clock,
-      final DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager,
-      final MessagesCacheInsertScript insertScript,
-      final MessagesCacheInsertSharedMultiRecipientPayloadAndViewsScript insertMrmScript,
-      final MessagesCacheGetItemsScript getItemsScript, final MessagesCacheRemoveByGuidScript removeByGuidScript,
-      final MessagesCacheRemoveQueueScript removeQueueScript,
-      final MessagesCacheGetQueuesToPersistScript getQueuesToPersistScript,
-      final MessagesCacheRemoveRecipientViewFromMrmDataScript removeRecipientViewFromMrmDataScript)
+  MessagesCache(final FaultTolerantRedisClusterClient redisCluster, final ExecutorService notificationExecutorService,
+                final Scheduler messageDeliveryScheduler, final ExecutorService messageDeletionExecutorService, final Clock clock,
+                final DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager,
+                final MessagesCacheInsertScript insertScript,
+                final MessagesCacheInsertSharedMultiRecipientPayloadAndViewsScript insertMrmScript,
+                final MessagesCacheGetItemsScript getItemsScript, final MessagesCacheRemoveByGuidScript removeByGuidScript,
+                final MessagesCacheRemoveQueueScript removeQueueScript,
+                final MessagesCacheGetQueuesToPersistScript getQueuesToPersistScript,
+                final MessagesCacheRemoveRecipientViewFromMrmDataScript removeRecipientViewFromMrmDataScript)
       throws IOException {
 
     this.redisCluster = redisCluster;
@@ -441,30 +441,30 @@ public class MessagesCache extends RedisClusterPubSubAdapter<String, String> imp
           ServiceIdentifier.valueOf(mrmMessage.getDestinationServiceId()), destinationDevice);
 
       final Mono<MessageProtos.Envelope> mrmMessageMono = Mono.from(redisCluster.withBinaryClusterReactive(
-          conn -> conn.reactive().hmget(key, "data".getBytes(StandardCharsets.UTF_8), sharedMrmViewKey)
-              .collectList()
-              .publishOn(messageDeliveryScheduler)
-              .handle((mrmDataAndView, sink) -> {
-                try {
-                  assert mrmDataAndView.size() == 2;
+              conn -> conn.reactive().hmget(key, "data".getBytes(StandardCharsets.UTF_8), sharedMrmViewKey)
+                  .collectList()
+                  .publishOn(messageDeliveryScheduler)))
+          .<MessageProtos.Envelope>handle((mrmDataAndView, sink) -> {
+            try {
+              assert mrmDataAndView.size() == 2;
 
-                  final byte[] content = SealedSenderMultiRecipientMessage.messageForRecipient(
-                      mrmDataAndView.getFirst().getValue(),
-                      mrmDataAndView.getLast().getValue());
+              final byte[] content = SealedSenderMultiRecipientMessage.messageForRecipient(
+                  mrmDataAndView.getFirst().getValue(),
+                  mrmDataAndView.getLast().getValue());
 
-                  sink.next(mrmMessage.toBuilder()
-                      .clearSharedMrmKey()
-                      .setContent(ByteString.copyFrom(content))
-                      .build());
+              sink.next(mrmMessage.toBuilder()
+                  .clearSharedMrmKey()
+                  .setContent(ByteString.copyFrom(content))
+                  .build());
 
-                  mrmContentRetrievedCounter.increment();
-                } catch (Exception e) {
-                  sink.error(e);
-                }
-              })));
+              mrmContentRetrievedCounter.increment();
+            } catch (Exception e) {
+              sink.error(e);
+            }
+          })
+          .share();
 
-      experiment.compareFutureResult(mrmMessage.toBuilder().clearSharedMrmKey().build(),
-          mrmMessageMono.toFuture());
+      experiment.compareMonoResult(mrmMessage.toBuilder().clearSharedMrmKey().build(), mrmMessageMono);
 
       return mrmMessageMono;
     } else {

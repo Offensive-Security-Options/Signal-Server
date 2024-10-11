@@ -526,10 +526,10 @@ class RegistrationControllerTest {
     }
 
     final AccountAttributes fetchesMessagesAccountAttributes =
-        new AccountAttributes(true, 1, 1, "test".getBytes(StandardCharsets.UTF_8), null, true, new Device.DeviceCapabilities(false, false, false, false, false));
+        new AccountAttributes(true, 1, 1, "test".getBytes(StandardCharsets.UTF_8), null, true, new Device.DeviceCapabilities(false, false, false, false));
 
     final AccountAttributes pushAccountAttributes =
-        new AccountAttributes(false, 1, 1, "test".getBytes(StandardCharsets.UTF_8), null, true, new Device.DeviceCapabilities(false, false, false, false, false));
+        new AccountAttributes(false, 1, 1, "test".getBytes(StandardCharsets.UTF_8), null, true, new Device.DeviceCapabilities(false, false, false, false));
 
     return Stream.of(
         // "Fetches messages" is true, but an APNs token is provided
@@ -543,7 +543,7 @@ class RegistrationControllerTest {
             pniSignedPreKey,
             aciPqLastResortPreKey,
             pniPqLastResortPreKey,
-            Optional.of(new ApnRegistrationId("apns-token", null)),
+            Optional.of(new ApnRegistrationId("apns-token")),
             Optional.empty())),
 
         // "Fetches messages" is true, but an FCM (GCM) token is provided
@@ -571,7 +571,7 @@ class RegistrationControllerTest {
             pniSignedPreKey,
             aciPqLastResortPreKey,
             pniPqLastResortPreKey,
-            Optional.of(new ApnRegistrationId("apns-token", null)),
+            Optional.of(new ApnRegistrationId("apns-token")),
             Optional.of(new GcmRegistrationId("gcm-token"))))
     );
   }
@@ -615,7 +615,7 @@ class RegistrationControllerTest {
     }
 
     final AccountAttributes accountAttributes =
-        new AccountAttributes(true, 1, 1, "test".getBytes(StandardCharsets.UTF_8), null, true, new Device.DeviceCapabilities(false, false, false, false, false));
+        new AccountAttributes(true, 1, 1, "test".getBytes(StandardCharsets.UTF_8), null, true, new Device.DeviceCapabilities(false, false, false, false));
 
     return Stream.of(
         // Signed PNI EC pre-key is missing
@@ -786,16 +786,15 @@ class RegistrationControllerTest {
     final int registrationId = 1;
     final int pniRegistrationId = 2;
 
-    final Device.DeviceCapabilities deviceCapabilities = new Device.DeviceCapabilities(false, false, false, false, false);
+    final Device.DeviceCapabilities deviceCapabilities = new Device.DeviceCapabilities(false, false, false, false);
 
     final AccountAttributes fetchesMessagesAccountAttributes =
-        new AccountAttributes(true, registrationId, pniRegistrationId, "test".getBytes(StandardCharsets.UTF_8), null, true, new Device.DeviceCapabilities(false, false, false, false, false));
+        new AccountAttributes(true, registrationId, pniRegistrationId, "test".getBytes(StandardCharsets.UTF_8), null, true, new Device.DeviceCapabilities(false, false, false, false));
 
     final AccountAttributes pushAccountAttributes =
-        new AccountAttributes(false, registrationId, pniRegistrationId, "test".getBytes(StandardCharsets.UTF_8), null, true, new Device.DeviceCapabilities(false, false, false, false, false));
+        new AccountAttributes(false, registrationId, pniRegistrationId, "test".getBytes(StandardCharsets.UTF_8), null, true, new Device.DeviceCapabilities(false, false, false, false));
 
     final String apnsToken = "apns-token";
-    final String apnsVoipToken = "apns-voip-token";
     final String gcmToken = "gcm-token";
 
     return Stream.of(
@@ -840,7 +839,7 @@ class RegistrationControllerTest {
                 pniSignedPreKey,
                 aciPqLastResortPreKey,
                 pniPqLastResortPreKey,
-                Optional.of(new ApnRegistrationId(apnsToken, apnsVoipToken)),
+                Optional.of(new ApnRegistrationId(apnsToken)),
                 Optional.empty()),
             aciIdentityKey,
             pniIdentityKey,
@@ -852,7 +851,7 @@ class RegistrationControllerTest {
                 registrationId,
                 pniRegistrationId,
                 false,
-                Optional.of(new ApnRegistrationId(apnsToken, apnsVoipToken)),
+                Optional.of(new ApnRegistrationId(apnsToken)),
                 Optional.empty(),
                 aciSignedPreKey,
                 pniSignedPreKey,
@@ -907,7 +906,7 @@ class RegistrationControllerTest {
     final IdentityKey pniIdentityKey = new IdentityKey(pniIdentityKeyPair.getPublicKey());
 
     final AccountAttributes accountAttributes = new AccountAttributes(true, registrationId, pniRegistrationId, "name".getBytes(StandardCharsets.UTF_8), "reglock",
-            true, new Device.DeviceCapabilities(true, true, true, false, false));
+            true, new Device.DeviceCapabilities(true, true, false, false));
 
     final RegistrationRequest request = new RegistrationRequest(
         Base64.getEncoder().encodeToString(sessionId.getBytes(StandardCharsets.UTF_8)),

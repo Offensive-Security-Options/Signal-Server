@@ -43,6 +43,7 @@ import org.whispersystems.textsecuregcm.entities.GcmRegistrationId;
 import org.whispersystems.textsecuregcm.entities.KEMSignedPreKey;
 import org.whispersystems.textsecuregcm.identity.IdentityType;
 import org.whispersystems.textsecuregcm.push.ClientPresenceManager;
+import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClient;
 import org.whispersystems.textsecuregcm.redis.RedisClusterExtension;
 import org.whispersystems.textsecuregcm.securestorage.SecureStorageClient;
 import org.whispersystems.textsecuregcm.securevaluerecovery.SecureValueRecovery2Client;
@@ -77,7 +78,7 @@ public class AccountCreationDeletionIntegrationTest {
   private KeysManager keysManager;
   private ClientPublicKeysManager clientPublicKeysManager;
 
-  record DeliveryChannels(boolean fetchesMessages, String apnsToken, String apnsVoipToken, String fcmToken) {}
+  record DeliveryChannels(boolean fetchesMessages, String apnsToken, String fcmToken) {}
 
   @BeforeEach
   void setUp() {
@@ -105,7 +106,8 @@ public class AccountCreationDeletionIntegrationTest {
         DynamoDbExtensionSchema.Tables.NUMBERS.tableName(),
         DynamoDbExtensionSchema.Tables.PNI_ASSIGNMENTS.tableName(),
         DynamoDbExtensionSchema.Tables.USERNAMES.tableName(),
-        DynamoDbExtensionSchema.Tables.DELETED_ACCOUNTS.tableName());
+        DynamoDbExtensionSchema.Tables.DELETED_ACCOUNTS.tableName(),
+        DynamoDbExtensionSchema.Tables.USED_LINK_DEVICE_TOKENS.tableName());
 
     accountLockExecutor = Executors.newSingleThreadExecutor();
     clientPresenceExecutor = Executors.newSingleThreadExecutor();
@@ -141,6 +143,7 @@ public class AccountCreationDeletionIntegrationTest {
         accounts,
         phoneNumberIdentifiers,
         CACHE_CLUSTER_EXTENSION.getRedisCluster(),
+        mock(FaultTolerantRedisClient.class),
         accountLockManager,
         keysManager,
         messagesManager,
@@ -153,6 +156,7 @@ public class AccountCreationDeletionIntegrationTest {
         accountLockExecutor,
         clientPresenceExecutor,
         CLOCK,
+        "link-device-secret".getBytes(StandardCharsets.UTF_8),
         dynamicConfigurationManager);
   }
 
@@ -188,7 +192,6 @@ public class AccountCreationDeletionIntegrationTest {
         ThreadLocalRandom.current().nextBoolean(),
         ThreadLocalRandom.current().nextBoolean(),
         ThreadLocalRandom.current().nextBoolean(),
-        ThreadLocalRandom.current().nextBoolean(),
         ThreadLocalRandom.current().nextBoolean());
 
     final AccountAttributes accountAttributes = new AccountAttributes(deliveryChannels.fetchesMessages(),
@@ -212,8 +215,8 @@ public class AccountCreationDeletionIntegrationTest {
     final KEMSignedPreKey pniPqLastResortPreKey = KeysHelper.signedKEMPreKey(4, pniKeyPair);
 
     final Optional<ApnRegistrationId> maybeApnRegistrationId =
-        deliveryChannels.apnsToken() != null || deliveryChannels.apnsVoipToken() != null
-            ? Optional.of(new ApnRegistrationId(deliveryChannels.apnsToken(), deliveryChannels.apnsVoipToken()))
+        deliveryChannels.apnsToken() != null
+            ? Optional.of(new ApnRegistrationId(deliveryChannels.apnsToken()))
             : Optional.empty();
 
     final Optional<GcmRegistrationId> maybeGcmRegistrationId = deliveryChannels.fcmToken() != null
@@ -271,10 +274,10 @@ public class AccountCreationDeletionIntegrationTest {
     return ArgumentSets
         // deliveryChannels
         .argumentsForFirstParameter(
-            new DeliveryChannels(true, null, null, null),
-            new DeliveryChannels(false, "apns-token", null, null),
-            new DeliveryChannels(false, "apns-token", "apns-voip-token", null),
-            new DeliveryChannels(false, null, null, "fcm-token"))
+            new DeliveryChannels(true, null, null),
+            new DeliveryChannels(false, "apns-token", null),
+            new DeliveryChannels(false, "apns-token", null),
+            new DeliveryChannels(false, null, "fcm-token"))
 
         // discoverableByPhoneNumber
         .argumentsForNextParameter(true, false);
@@ -301,14 +304,14 @@ public class AccountCreationDeletionIntegrationTest {
 
       final Account originalAccount = accountsManager.create(number,
           new AccountAttributes(true, 1, 1, "name".getBytes(StandardCharsets.UTF_8), "registration-lock", false,
-              new Device.DeviceCapabilities(false, false, false, false, false)),
+              new Device.DeviceCapabilities(false, false, false, false)),
           Collections.emptyList(),
           new IdentityKey(aciKeyPair.getPublicKey()),
           new IdentityKey(pniKeyPair.getPublicKey()),
           new DeviceSpec(null,
               "password?",
               "OWI",
-              new Device.DeviceCapabilities(false, false, false, false, false),
+              new Device.DeviceCapabilities(false, false, false, false),
               1,
               2,
               true,
@@ -331,7 +334,6 @@ public class AccountCreationDeletionIntegrationTest {
     final String registrationLockSecret = RandomStringUtils.randomAlphanumeric(16);
 
     final Device.DeviceCapabilities deviceCapabilities = new Device.DeviceCapabilities(
-        ThreadLocalRandom.current().nextBoolean(),
         ThreadLocalRandom.current().nextBoolean(),
         ThreadLocalRandom.current().nextBoolean(),
         ThreadLocalRandom.current().nextBoolean(),
@@ -359,8 +361,8 @@ public class AccountCreationDeletionIntegrationTest {
     final KEMSignedPreKey pniPqLastResortPreKey = KeysHelper.signedKEMPreKey(4, pniKeyPair);
 
     final Optional<ApnRegistrationId> maybeApnRegistrationId =
-        deliveryChannels.apnsToken() != null || deliveryChannels.apnsVoipToken() != null
-            ? Optional.of(new ApnRegistrationId(deliveryChannels.apnsToken(), deliveryChannels.apnsVoipToken()))
+        deliveryChannels.apnsToken() != null
+            ? Optional.of(new ApnRegistrationId(deliveryChannels.apnsToken()))
             : Optional.empty();
 
     final Optional<GcmRegistrationId> maybeGcmRegistrationId = deliveryChannels.fcmToken() != null
@@ -423,7 +425,6 @@ public class AccountCreationDeletionIntegrationTest {
     final String registrationLockSecret = RandomStringUtils.randomAlphanumeric(16);
 
     final Device.DeviceCapabilities deviceCapabilities = new Device.DeviceCapabilities(
-        ThreadLocalRandom.current().nextBoolean(),
         ThreadLocalRandom.current().nextBoolean(),
         ThreadLocalRandom.current().nextBoolean(),
         ThreadLocalRandom.current().nextBoolean(),
@@ -519,19 +520,13 @@ public class AccountCreationDeletionIntegrationTest {
     assertEquals(deviceCapabilities, primaryDevice.getCapabilities());
     assertEquals(badges, account.getBadges());
 
-    maybeApnRegistrationId.ifPresentOrElse(apnRegistrationId -> {
-      assertEquals(apnRegistrationId.apnRegistrationId(), primaryDevice.getApnId());
-      assertEquals(apnRegistrationId.voipRegistrationId(), primaryDevice.getVoipApnId());
-    }, () -> {
-      assertNull(primaryDevice.getApnId());
-      assertNull(primaryDevice.getVoipApnId());
-    });
+    maybeApnRegistrationId.ifPresentOrElse(
+        apnRegistrationId -> assertEquals(apnRegistrationId.apnRegistrationId(), primaryDevice.getApnId()),
+        () -> assertNull(primaryDevice.getApnId()));
 
-    maybeGcmRegistrationId.ifPresentOrElse(gcmRegistrationId -> {
-      assertEquals(deliveryChannels.fcmToken(), primaryDevice.getGcmId());
-    }, () -> {
-      assertNull(primaryDevice.getGcmId());
-    });
+    maybeGcmRegistrationId.ifPresentOrElse(
+        gcmRegistrationId -> assertEquals(deliveryChannels.fcmToken(), primaryDevice.getGcmId()),
+        () -> assertNull(primaryDevice.getGcmId()));
 
     assertTrue(account.getRegistrationLock().verify(registrationLockSecret));
     assertTrue(primaryDevice.getAuthTokenHash().verify(password));

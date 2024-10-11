@@ -116,7 +116,6 @@ import org.whispersystems.textsecuregcm.push.MessageSender;
 import org.whispersystems.textsecuregcm.push.PushNotificationManager;
 import org.whispersystems.textsecuregcm.push.PushNotificationScheduler;
 import org.whispersystems.textsecuregcm.push.ReceiptSender;
-import org.whispersystems.textsecuregcm.spam.ReportSpamTokenProvider;
 import org.whispersystems.textsecuregcm.spam.SpamChecker;
 import org.whispersystems.textsecuregcm.storage.Account;
 import org.whispersystems.textsecuregcm.storage.AccountsManager;
@@ -163,7 +162,6 @@ public class MessageController {
   private final ReportMessageManager reportMessageManager;
   private final ExecutorService multiRecipientMessageExecutor;
   private final Scheduler messageDeliveryScheduler;
-  private final ReportSpamTokenProvider reportSpamTokenProvider;
   private final ClientReleaseManager clientReleaseManager;
   private final DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager;
   private final ServerSecretParams serverSecretParams;
@@ -183,10 +181,7 @@ public class MessageController {
   private static final String RATE_LIMITED_MESSAGE_COUNTER_NAME = name(MessageController.class, "rateLimitedMessage");
 
   private static final String REJECT_INVALID_ENVELOPE_TYPE = name(MessageController.class, "rejectInvalidEnvelopeType");
-  private static final Timer SEND_MESSAGE_LATENCY_TIMER =
-      Timer.builder(MetricsUtil.name(MessageController.class, "sendMessageLatency"))
-          .publishPercentileHistogram(true)
-          .register(Metrics.globalRegistry);
+  private static final String SEND_MESSAGE_LATENCY_TIMER_NAME = MetricsUtil.name(MessageController.class, "sendMessageLatency");
 
   private static final String EPHEMERAL_TAG_NAME = "ephemeral";
   private static final String SENDER_TYPE_TAG_NAME = "senderType";
@@ -226,7 +221,6 @@ public class MessageController {
       ReportMessageManager reportMessageManager,
       @Nonnull ExecutorService multiRecipientMessageExecutor,
       Scheduler messageDeliveryScheduler,
-      @Nonnull ReportSpamTokenProvider reportSpamTokenProvider,
       final ClientReleaseManager clientReleaseManager,
       final DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager,
       final ServerSecretParams serverSecretParams,
@@ -245,7 +239,6 @@ public class MessageController {
     this.reportMessageManager = reportMessageManager;
     this.multiRecipientMessageExecutor = Objects.requireNonNull(multiRecipientMessageExecutor);
     this.messageDeliveryScheduler = messageDeliveryScheduler;
-    this.reportSpamTokenProvider = reportSpamTokenProvider;
     this.clientReleaseManager = clientReleaseManager;
     this.dynamicConfigurationManager = dynamicConfigurationManager;
     this.serverSecretParams = serverSecretParams;
@@ -255,7 +248,6 @@ public class MessageController {
     this.clock = clock;
   }
 
-  @Timed
   @Path("/{destination}")
   @PUT
   @Consumes(MediaType.APPLICATION_JSON)
@@ -301,25 +293,25 @@ public class MessageController {
 
       @Context final ContainerRequestContext context) throws RateLimitExceededException {
 
+    if (source.isEmpty() && accessKey.isEmpty() && groupSendToken == null && !isStory) {
+      throw new WebApplicationException(Status.UNAUTHORIZED);
+    }
+
+    if (groupSendToken != null) {
+      if (source.isPresent() || accessKey.isPresent()) {
+        throw new BadRequestException(
+            "Group send endorsement tokens should not be combined with other authentication");
+      } else if (isStory) {
+        throw new BadRequestException("Group send endorsement tokens should not be sent for story messages");
+      }
+    }
+
+    final String senderType = source.map(
+            s -> s.getAccount().isIdentifiedBy(destinationIdentifier) ? SENDER_TYPE_SELF : SENDER_TYPE_IDENTIFIED)
+        .orElse(SENDER_TYPE_UNIDENTIFIED);
+
     final Sample sample = Timer.start();
     try {
-      if (source.isEmpty() && accessKey.isEmpty() && groupSendToken == null && !isStory) {
-        throw new WebApplicationException(Response.Status.UNAUTHORIZED);
-      }
-
-      if (groupSendToken != null) {
-        if (source.isPresent() || accessKey.isPresent()) {
-          throw new BadRequestException(
-              "Group send endorsement tokens should not be combined with other authentication");
-        } else if (isStory) {
-          throw new BadRequestException("Group send endorsement tokens should not be sent for story messages");
-        }
-      }
-
-      final String senderType = source.map(
-              s -> s.getAccount().isIdentifiedBy(destinationIdentifier) ? SENDER_TYPE_SELF : SENDER_TYPE_IDENTIFIED)
-          .orElse(SENDER_TYPE_UNIDENTIFIED);
-
       final boolean isSyncMessage = senderType.equals(SENDER_TYPE_SELF);
 
       if (isSyncMessage && destinationIdentifier.identityType() == IdentityType.PNI) {
@@ -333,16 +325,13 @@ public class MessageController {
         destination = source.map(AuthenticatedDevice::getAccount);
       }
 
-      final Optional<Response> spamCheck = spamChecker.checkForSpam(
-          context, source.map(AuthenticatedDevice::getAccount), destination);
-      if (spamCheck.isPresent()) {
-        return spamCheck.get();
+      final SpamChecker.SpamCheckResult spamCheck = spamChecker.checkForSpam(
+          context, source, destination);
+      final Optional<byte[]> reportSpamToken;
+      switch (spamCheck) {
+        case final SpamChecker.Spam spam: return spam.response();
+        case final SpamChecker.NotSpam notSpam: reportSpamToken = notSpam.token();
       }
-
-      final Optional<byte[]> spamReportToken = switch (senderType) {
-        case SENDER_TYPE_IDENTIFIED -> reportSpamTokenProvider.makeReportSpamToken(context, source.get(), destination);
-        default -> Optional.empty();
-      };
 
       int totalContentLength = 0;
 
@@ -453,7 +442,7 @@ public class MessageController {
                     messages.urgent(),
                     incomingMessage,
                     userAgent,
-                    spamReportToken);
+                    reportSpamToken);
               });
         }
 
@@ -471,7 +460,10 @@ public class MessageController {
             .build());
       }
     } finally {
-      sample.stop(SEND_MESSAGE_LATENCY_TIMER);
+      sample.stop(Timer.builder(SEND_MESSAGE_LATENCY_TIMER_NAME)
+          .tags(SENDER_TYPE_TAG_NAME, senderType)
+          .publishPercentileHistogram(true)
+          .register(Metrics.globalRegistry));
     }
   }
 
@@ -555,9 +547,9 @@ public class MessageController {
 
       @Context ContainerRequestContext context) throws RateLimitExceededException {
 
-    final Optional<Response> spamCheck = spamChecker.checkForSpam(context, Optional.empty(), Optional.empty());
-    if (spamCheck.isPresent()) {
-      return spamCheck.get();
+    final SpamChecker.SpamCheckResult spamCheck = spamChecker.checkForSpam(context, Optional.empty(), Optional.empty());
+    if (spamCheck instanceof final SpamChecker.Spam spam) {
+      return spam.response();
     }
 
     if (groupSendToken == null && accessKeys == null && !isStory) {

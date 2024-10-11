@@ -14,6 +14,7 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -35,6 +36,7 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import org.mockito.Mockito;
 import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfiguration;
 import org.whispersystems.textsecuregcm.push.ClientPresenceManager;
+import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClient;
 import org.whispersystems.textsecuregcm.redis.RedisClusterExtension;
 import org.whispersystems.textsecuregcm.securestorage.SecureStorageClient;
 import org.whispersystems.textsecuregcm.securevaluerecovery.SecureValueRecovery2Client;
@@ -105,7 +107,8 @@ class AccountsManagerUsernameIntegrationTest {
         Tables.NUMBERS.tableName(),
         Tables.PNI_ASSIGNMENTS.tableName(),
         Tables.USERNAMES.tableName(),
-        Tables.DELETED_ACCOUNTS.tableName()));
+        Tables.DELETED_ACCOUNTS.tableName(),
+        Tables.USED_LINK_DEVICE_TOKENS.tableName()));
 
     final AccountLockManager accountLockManager = mock(AccountLockManager.class);
 
@@ -135,6 +138,7 @@ class AccountsManagerUsernameIntegrationTest {
         accounts,
         phoneNumberIdentifiers,
         CACHE_CLUSTER_EXTENSION.getRedisCluster(),
+        mock(FaultTolerantRedisClient.class),
         accountLockManager,
         keysManager,
         messageManager,
@@ -147,6 +151,7 @@ class AccountsManagerUsernameIntegrationTest {
         Executors.newSingleThreadExecutor(),
         Executors.newSingleThreadExecutor(),
         mock(Clock.class),
+        "link-device-secret".getBytes(StandardCharsets.UTF_8),
         dynamicConfigurationManager);
   }
 
