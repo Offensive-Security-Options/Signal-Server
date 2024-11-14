@@ -61,9 +61,11 @@ public class MessagePersister implements Managed {
 
   private static final Logger logger = LoggerFactory.getLogger(MessagePersister.class);
 
-  public MessagePersister(final MessagesCache messagesCache, final MessagesManager messagesManager,
+  public MessagePersister(final MessagesCache messagesCache,
+      final MessagesManager messagesManager,
       final AccountsManager accountsManager,
-      final DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager, final Duration persistDelay,
+      final DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager,
+      final Duration persistDelay,
       final int dedicatedProcessWorkerThreadCount
   ) {
 

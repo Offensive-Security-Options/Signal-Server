@@ -160,9 +160,6 @@ dynamoDbTables:
 cacheCluster: # Redis server configuration for cache cluster
   configurationUri: redis://redis.example.com:6379/
 
-clientPresenceCluster: # Redis server configuration for client presence cluster
-  configurationUri: redis://redis.example.com:6379/
-
 pubsub: # Redis server configuration for pubsub cluster
   uri: redis://redis.example.com:6379/
 
@@ -239,13 +236,6 @@ messageCache: # Redis server configuration for message store cache
   cluster:
     configurationUri: redis://redis.example.com:6379/
 
-awsAttachments: # AWS S3 configuration
-  bucket: aws-attachments
-  credentials:
-    accessKeyId: secret://awsAttachments.accessKey
-    secretAccessKey: secret://awsAttachments.accessSecret
-  region: us-west-2
-
 gcpAttachments: # GCP Storage configuration
   domain: example.com
   email: user@example.cocm
@@ -291,9 +281,6 @@ unidentifiedDelivery:
   privateKey: secret://unidentifiedDelivery.privateKey
   expiresDays: 7
 
-hCaptcha:
-  apiKey: secret://hCaptcha.apiKey
-
 shortCode:
   baseUrl: https://example.com/shortcodes/
 
@@ -334,10 +321,12 @@ callingZkConfig:
 backupsZkConfig:
   serverSecret: secret://backupsZkConfig.serverSecret
 
-appConfig:
-  application: example
-  environment: example
-  configuration: example
+dynamicConfig:
+  s3Region: a-region
+  s3Bucket: a-bucket
+  objectKey: dynamic-config.yaml
+  maxSize: 100000
+  refreshInterval: PT10S
 
 remoteConfig:
   globalConfig: # keys and values that are given to clients on GET /v1/config
@@ -474,6 +463,29 @@ keyTransparencyService:
     ABCDEFGHIJKLMNOPQRSTUVWXYZ/0123456789+abcdefghijklmnopqrstuvwxyz
     AAAAAAAAAAAAAAAAAAAA
     -----END CERTIFICATE-----
+  clientCertificate: |
+    -----BEGIN CERTIFICATE-----
+    ABCDEFGHIJKLMNOPQRSTUVWXYZ/0123456789+abcdefghijklmnopqrstuvwxyz
+    ABCDEFGHIJKLMNOPQRSTUVWXYZ/0123456789+abcdefghijklmnopqrstuvwxyz
+    ABCDEFGHIJKLMNOPQRSTUVWXYZ/0123456789+abcdefghijklmnopqrstuvwxyz
+    ABCDEFGHIJKLMNOPQRSTUVWXYZ/0123456789+abcdefghijklmnopqrstuvwxyz
+    ABCDEFGHIJKLMNOPQRSTUVWXYZ/0123456789+abcdefghijklmnopqrstuvwxyz
+    ABCDEFGHIJKLMNOPQRSTUVWXYZ/0123456789+abcdefghijklmnopqrstuvwxyz
+    ABCDEFGHIJKLMNOPQRSTUVWXYZ/0123456789+abcdefghijklmnopqrstuvwxyz
+    ABCDEFGHIJKLMNOPQRSTUVWXYZ/0123456789+abcdefghijklmnopqrstuvwxyz
+    ABCDEFGHIJKLMNOPQRSTUVWXYZ/0123456789+abcdefghijklmnopqrstuvwxyz
+    ABCDEFGHIJKLMNOPQRSTUVWXYZ/0123456789+abcdefghijklmnopqrstuvwxyz
+    ABCDEFGHIJKLMNOPQRSTUVWXYZ/0123456789+abcdefghijklmnopqrstuvwxyz
+    ABCDEFGHIJKLMNOPQRSTUVWXYZ/0123456789+abcdefghijklmnopqrstuvwxyz
+    ABCDEFGHIJKLMNOPQRSTUVWXYZ/0123456789+abcdefghijklmnopqrstuvwxyz
+    ABCDEFGHIJKLMNOPQRSTUVWXYZ/0123456789+abcdefghijklmnopqrstuvwxyz
+    ABCDEFGHIJKLMNOPQRSTUVWXYZ/0123456789+abcdefghijklmnopqrstuvwxyz
+    ABCDEFGHIJKLMNOPQRSTUVWXYZ/0123456789+abcdefghijklmnopqrstuvwxyz
+    ABCDEFGHIJKLMNOPQRSTUVWXYZ/0123456789+abcdefghijklmnopqrstuvwxyz
+    ABCDEFGHIJKLMNOPQRSTUVWXYZ/0123456789+abcdefghijklmnopqrstuvwxyz
+    AAAAAAAAAAAAAAAAAAAA
+    -----END CERTIFICATE-----
+  clientPrivateKey: secret://keyTransparencyService.clientPrivateKey
 
 turn:
   secret: secret://turn.secret

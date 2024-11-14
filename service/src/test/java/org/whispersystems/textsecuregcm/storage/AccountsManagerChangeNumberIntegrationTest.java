@@ -18,10 +18,11 @@ import java.time.Clock;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -30,12 +31,12 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import org.signal.libsignal.protocol.IdentityKey;
 import org.signal.libsignal.protocol.ecc.Curve;
 import org.signal.libsignal.protocol.ecc.ECKeyPair;
+import org.whispersystems.textsecuregcm.auth.DisconnectionRequestManager;
 import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfiguration;
 import org.whispersystems.textsecuregcm.controllers.MismatchedDevicesException;
 import org.whispersystems.textsecuregcm.entities.AccountAttributes;
 import org.whispersystems.textsecuregcm.entities.ECSignedPreKey;
 import org.whispersystems.textsecuregcm.identity.IdentityType;
-import org.whispersystems.textsecuregcm.push.ClientPresenceManager;
 import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClient;
 import org.whispersystems.textsecuregcm.redis.RedisClusterExtension;
 import org.whispersystems.textsecuregcm.securestorage.SecureStorageClient;
@@ -65,9 +66,8 @@ class AccountsManagerChangeNumberIntegrationTest {
   static final RedisClusterExtension CACHE_CLUSTER_EXTENSION = RedisClusterExtension.builder().build();
 
   private KeysManager keysManager;
-  private ClientPresenceManager clientPresenceManager;
-  private ExecutorService accountLockExecutor;
-  private ExecutorService clientPresenceExecutor;
+  private DisconnectionRequestManager disconnectionRequestManager;
+  private ScheduledExecutorService executor;
 
   private AccountsManager accountsManager;
 
@@ -102,14 +102,13 @@ class AccountsManagerChangeNumberIntegrationTest {
           Tables.DELETED_ACCOUNTS.tableName(),
           Tables.USED_LINK_DEVICE_TOKENS.tableName());
 
-      accountLockExecutor = Executors.newSingleThreadExecutor();
-      clientPresenceExecutor = Executors.newSingleThreadExecutor();
+      executor = Executors.newSingleThreadScheduledExecutor();
 
       final AccountLockManager accountLockManager = new AccountLockManager(DYNAMO_DB_EXTENSION.getDynamoDbClient(),
           Tables.DELETED_ACCOUNTS_LOCK.tableName());
 
       final ClientPublicKeysManager clientPublicKeysManager =
-          new ClientPublicKeysManager(clientPublicKeys, accountLockManager, accountLockExecutor);
+          new ClientPublicKeysManager(clientPublicKeys, accountLockManager, executor);
 
       final SecureStorageClient secureStorageClient = mock(SecureStorageClient.class);
       when(secureStorageClient.deleteStoredData(any())).thenReturn(CompletableFuture.completedFuture(null));
@@ -117,7 +116,7 @@ class AccountsManagerChangeNumberIntegrationTest {
       final SecureValueRecovery2Client svr2Client = mock(SecureValueRecovery2Client.class);
       when(svr2Client.deleteBackups(any())).thenReturn(CompletableFuture.completedFuture(null));
 
-      clientPresenceManager = mock(ClientPresenceManager.class);
+      disconnectionRequestManager = mock(DisconnectionRequestManager.class);
 
       final PhoneNumberIdentifiers phoneNumberIdentifiers =
           new PhoneNumberIdentifiers(DYNAMO_DB_EXTENSION.getDynamoDbClient(), Tables.PNI.tableName());
@@ -145,11 +144,11 @@ class AccountsManagerChangeNumberIntegrationTest {
           profilesManager,
           secureStorageClient,
           svr2Client,
-          clientPresenceManager,
+          disconnectionRequestManager,
           registrationRecoveryPasswordsManager,
           clientPublicKeysManager,
-          accountLockExecutor,
-          clientPresenceExecutor,
+          executor,
+          executor,
           mock(Clock.class),
           "link-device-secret".getBytes(StandardCharsets.UTF_8),
           dynamicConfigurationManager);
@@ -158,14 +157,10 @@ class AccountsManagerChangeNumberIntegrationTest {
 
   @AfterEach
   void tearDown() throws InterruptedException {
-    accountLockExecutor.shutdown();
-    clientPresenceExecutor.shutdown();
+    executor.shutdown();
 
     //noinspection ResultOfMethodCallIgnored
-    accountLockExecutor.awaitTermination(1, TimeUnit.SECONDS);
-
-    //noinspection ResultOfMethodCallIgnored
-    clientPresenceExecutor.awaitTermination(1, TimeUnit.SECONDS);
+    executor.awaitTermination(1, TimeUnit.SECONDS);
   }
 
   @Test
@@ -198,7 +193,7 @@ class AccountsManagerChangeNumberIntegrationTest {
     final int rotatedPniRegistrationId = 17;
     final ECKeyPair rotatedPniIdentityKeyPair = Curve.generateKeyPair();
     final ECSignedPreKey rotatedSignedPreKey = KeysHelper.signedECPreKey(1L, rotatedPniIdentityKeyPair);
-    final AccountAttributes accountAttributes = new AccountAttributes(true, rotatedPniRegistrationId + 1, rotatedPniRegistrationId, "test".getBytes(StandardCharsets.UTF_8), null, true, new Device.DeviceCapabilities(false, false, false, false));
+    final AccountAttributes accountAttributes = new AccountAttributes(true, rotatedPniRegistrationId + 1, rotatedPniRegistrationId, "test".getBytes(StandardCharsets.UTF_8), null, true, Set.of());
     final Account account = AccountsHelper.createAccount(accountsManager, originalNumber, accountAttributes);
 
     keysManager.storeEcSignedPreKeys(account.getIdentifier(IdentityType.ACI),
@@ -280,7 +275,7 @@ class AccountsManagerChangeNumberIntegrationTest {
 
     assertEquals(secondNumber, accountsManager.getByAccountIdentifier(originalUuid).map(Account::getNumber).orElseThrow());
 
-    verify(clientPresenceManager).disconnectPresence(existingAccountUuid, Device.PRIMARY_ID);
+    verify(disconnectionRequestManager).requestDisconnection(existingAccountUuid);
 
     assertEquals(Optional.of(existingAccountUuid), accountsManager.findRecentlyDeletedAccountIdentifier(originalNumber));
     assertEquals(Optional.empty(), accountsManager.findRecentlyDeletedAccountIdentifier(secondNumber));

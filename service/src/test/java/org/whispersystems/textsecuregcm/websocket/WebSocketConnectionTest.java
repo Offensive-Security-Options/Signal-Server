@@ -57,7 +57,7 @@ import org.whispersystems.textsecuregcm.auth.AuthenticatedDevice;
 import org.whispersystems.textsecuregcm.identity.AciServiceIdentifier;
 import org.whispersystems.textsecuregcm.limits.MessageDeliveryLoopMonitor;
 import org.whispersystems.textsecuregcm.metrics.MessageMetrics;
-import org.whispersystems.textsecuregcm.push.ClientPresenceManager;
+import org.whispersystems.textsecuregcm.push.WebSocketConnectionEventManager;
 import org.whispersystems.textsecuregcm.push.PushNotificationManager;
 import org.whispersystems.textsecuregcm.push.PushNotificationScheduler;
 import org.whispersystems.textsecuregcm.push.ReceiptSender;
@@ -124,8 +124,8 @@ class WebSocketConnectionTest {
         new WebSocketAccountAuthenticator(accountAuthenticator, mock(PrincipalSupplier.class));
     AuthenticatedConnectListener connectListener = new AuthenticatedConnectListener(receiptSender, messagesManager,
         new MessageMetrics(), mock(PushNotificationManager.class), mock(PushNotificationScheduler.class),
-        mock(ClientPresenceManager.class), retrySchedulingExecutor, messageDeliveryScheduler, clientReleaseManager,
-        mock(MessageDeliveryLoopMonitor.class));
+        mock(WebSocketConnectionEventManager.class), retrySchedulingExecutor,
+        messageDeliveryScheduler, clientReleaseManager, mock(MessageDeliveryLoopMonitor.class));
     WebSocketSessionContext sessionContext = mock(WebSocketSessionContext.class);
 
     when(accountAuthenticator.authenticate(eq(new BasicCredentials(VALID_USER, VALID_PASSWORD))))
@@ -268,7 +268,7 @@ class WebSocketConnectionTest {
       // or wait for anything.
       connection.start();
 
-      connection.handleNewMessagesAvailable();
+      connection.handleNewMessageAvailable();
 
       synchronized (sendCounter) {
         while (sendCounter.get() < 1) {
@@ -276,7 +276,7 @@ class WebSocketConnectionTest {
         }
       }
 
-      connection.handleNewMessagesAvailable();
+      connection.handleNewMessageAvailable();
 
       synchronized (sendCounter) {
         while (sendCounter.get() < 2) {
@@ -693,7 +693,7 @@ class WebSocketConnectionTest {
 
     when(client.sendRequest(eq("PUT"), eq("/api/v1/message"), any(List.class), any(Optional.class)))
         .thenAnswer(invocation -> {
-          connection.handleNewMessagesAvailable();
+          connection.handleNewMessageAvailable();
 
           return CompletableFuture.completedFuture(successResponse);
         });
@@ -741,7 +741,7 @@ class WebSocketConnectionTest {
 
     verify(messagesManager).getMessagesForDeviceReactive(account.getUuid(), device, false);
 
-    connection.handleNewMessagesAvailable();
+    connection.handleNewMessageAvailable();
 
     verify(messagesManager).getMessagesForDeviceReactive(account.getUuid(), device, true);
   }

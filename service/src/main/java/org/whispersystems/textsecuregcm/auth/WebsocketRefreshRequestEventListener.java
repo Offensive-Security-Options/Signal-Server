@@ -9,20 +9,20 @@ import static org.whispersystems.textsecuregcm.metrics.MetricsUtil.name;
 
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Metrics;
+import jakarta.ws.rs.container.ResourceInfo;
+import jakarta.ws.rs.core.Context;
 import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
-import javax.ws.rs.container.ResourceInfo;
-import javax.ws.rs.core.Context;
 import org.glassfish.jersey.server.monitoring.RequestEvent;
 import org.glassfish.jersey.server.monitoring.RequestEvent.Type;
 import org.glassfish.jersey.server.monitoring.RequestEventListener;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.whispersystems.textsecuregcm.push.ClientPresenceManager;
 
 public class WebsocketRefreshRequestEventListener implements RequestEventListener {
 
-  private final ClientPresenceManager clientPresenceManager;
+  private final DisconnectionRequestManager disconnectionRequestManager;
   private final WebsocketRefreshRequirementProvider[] providers;
 
   private static final Counter DISPLACED_ACCOUNTS = Metrics.counter(
@@ -34,10 +34,10 @@ public class WebsocketRefreshRequestEventListener implements RequestEventListene
   private static final Logger logger = LoggerFactory.getLogger(WebsocketRefreshRequestEventListener.class);
 
   public WebsocketRefreshRequestEventListener(
-      final ClientPresenceManager clientPresenceManager,
+      final DisconnectionRequestManager disconnectionRequestManager,
       final WebsocketRefreshRequirementProvider... providers) {
 
-    this.clientPresenceManager = clientPresenceManager;
+    this.disconnectionRequestManager = disconnectionRequestManager;
     this.providers = providers;
   }
 
@@ -59,7 +59,7 @@ public class WebsocketRefreshRequestEventListener implements RequestEventListene
           .forEach(pair -> {
             try {
               displacedDevices.incrementAndGet();
-              clientPresenceManager.disconnectPresence(pair.first(), pair.second());
+              disconnectionRequestManager.requestDisconnection(pair.first(), List.of(pair.second()));
             } catch (final Exception e) {
               logger.error("Could not displace device presence", e);
             }

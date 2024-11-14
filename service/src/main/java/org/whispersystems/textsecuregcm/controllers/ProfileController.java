@@ -11,8 +11,26 @@ import com.google.common.base.Preconditions;
 import io.dropwizard.auth.Auth;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Metrics;
-import io.micrometer.core.instrument.Tags;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotNull;
+import jakarta.ws.rs.BadRequestException;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.HeaderParam;
+import jakarta.ws.rs.NotAuthorizedException;
+import jakarta.ws.rs.NotFoundException;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.PUT;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
+import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.core.Context;
+import jakarta.ws.rs.core.HttpHeaders;
+import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
@@ -23,34 +41,12 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.HexFormat;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.function.Function;
 import java.util.stream.Collectors;
-import javax.validation.Valid;
-import javax.validation.constraints.NotNull;
-import javax.ws.rs.BadRequestException;
-import javax.ws.rs.Consumes;
-import javax.ws.rs.GET;
-import javax.ws.rs.HeaderParam;
-import javax.ws.rs.NotAuthorizedException;
-import javax.ws.rs.NotFoundException;
-import javax.ws.rs.POST;
-import javax.ws.rs.PUT;
-import javax.ws.rs.Path;
-import javax.ws.rs.PathParam;
-import javax.ws.rs.ProcessingException;
-import javax.ws.rs.Produces;
-import javax.ws.rs.QueryParam;
-import javax.ws.rs.container.ContainerRequestContext;
-import javax.ws.rs.core.Context;
-import javax.ws.rs.core.HttpHeaders;
-import javax.ws.rs.core.MediaType;
-import javax.ws.rs.core.Response;
 import org.glassfish.jersey.server.ManagedAsync;
 import org.signal.libsignal.protocol.IdentityKey;
 import org.signal.libsignal.protocol.ServiceId;
@@ -61,8 +57,6 @@ import org.signal.libsignal.zkgroup.groupsend.GroupSendDerivedKeyPair;
 import org.signal.libsignal.zkgroup.groupsend.GroupSendFullToken;
 import org.signal.libsignal.zkgroup.profiles.ExpiringProfileKeyCredentialResponse;
 import org.signal.libsignal.zkgroup.profiles.ServerZkProfileOperations;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.whispersystems.textsecuregcm.auth.Anonymous;
 import org.whispersystems.textsecuregcm.auth.AuthenticatedDevice;
 import org.whispersystems.textsecuregcm.auth.GroupSendTokenHeader;
@@ -79,19 +73,18 @@ import org.whispersystems.textsecuregcm.entities.CreateProfileRequest;
 import org.whispersystems.textsecuregcm.entities.CredentialProfileResponse;
 import org.whispersystems.textsecuregcm.entities.ExpiringProfileKeyCredentialProfileResponse;
 import org.whispersystems.textsecuregcm.entities.ProfileAvatarUploadAttributes;
-import org.whispersystems.textsecuregcm.entities.UserCapabilities;
 import org.whispersystems.textsecuregcm.entities.VersionedProfileResponse;
 import org.whispersystems.textsecuregcm.identity.AciServiceIdentifier;
 import org.whispersystems.textsecuregcm.identity.IdentityType;
 import org.whispersystems.textsecuregcm.identity.PniServiceIdentifier;
 import org.whispersystems.textsecuregcm.identity.ServiceIdentifier;
 import org.whispersystems.textsecuregcm.limits.RateLimiters;
-import org.whispersystems.textsecuregcm.metrics.UserAgentTagUtil;
 import org.whispersystems.textsecuregcm.s3.PolicySigner;
 import org.whispersystems.textsecuregcm.s3.PostPolicyGenerator;
 import org.whispersystems.textsecuregcm.storage.Account;
 import org.whispersystems.textsecuregcm.storage.AccountBadge;
 import org.whispersystems.textsecuregcm.storage.AccountsManager;
+import org.whispersystems.textsecuregcm.storage.DeviceCapability;
 import org.whispersystems.textsecuregcm.storage.DynamicConfigurationManager;
 import org.whispersystems.textsecuregcm.storage.ProfilesManager;
 import org.whispersystems.textsecuregcm.storage.VersionedProfile;
@@ -108,7 +101,6 @@ import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
 @Path("/v1/profile")
 @Tag(name = "Profile")
 public class ProfileController {
-  private final Logger logger = LoggerFactory.getLogger(ProfileController.class);
   private final Clock clock;
   private final RateLimiters rateLimiters;
   private final ProfilesManager profilesManager;
@@ -130,7 +122,6 @@ public class ProfileController {
   private static final String EXPIRING_PROFILE_KEY_CREDENTIAL_TYPE = "expiringProfileKey";
 
   private static final Counter VERSION_NOT_FOUND_COUNTER = Metrics.counter(name(ProfileController.class, "versionNotFound"));
-  private static final String INVALID_ACCEPT_LANGUAGE_COUNTER_NAME = name(ProfileController.class, "invalidAcceptLanguage");
 
   public ProfileController(
       Clock clock,
@@ -312,14 +303,10 @@ public class ProfileController {
           maybeRequester, accessKey.filter(ignored -> identifier.identityType() == IdentityType.ACI), identifier);
     }
     return switch (identifier.identityType()) {
-      case ACI -> {
-        yield buildBaseProfileResponseForAccountIdentity(targetAccount,
-            maybeRequester.map(requester -> ProfileHelper.isSelfProfileRequest(requester.getUuid(), identifier)).orElse(false),
-            containerRequestContext);
-      }
-      case PNI -> {
-        yield buildBaseProfileResponseForPhoneNumberIdentity(targetAccount);
-      }
+      case ACI -> buildBaseProfileResponseForAccountIdentity(targetAccount,
+          maybeRequester.map(requester -> ProfileHelper.isSelfProfileRequest(requester.getUuid(), identifier)).orElse(false),
+          containerRequestContext);
+      case PNI -> buildBaseProfileResponseForPhoneNumberIdentity(targetAccount);
     };
   }
 
@@ -363,7 +350,7 @@ public class ProfileController {
   private void checkFingerprintAndAdd(BatchIdentityCheckRequest.Element element,
       Collection<BatchIdentityCheckResponse.Element> responseElements, MessageDigest md) {
 
-    final ServiceIdentifier identifier = Objects.requireNonNullElse(element.uuid(), element.aci());
+    final ServiceIdentifier identifier = element.uuid();
     final Optional<Account> maybeAccount = accountsManager.getByServiceIdentifier(identifier);
 
     maybeAccount.ifPresent(account -> {
@@ -377,7 +364,7 @@ public class ProfileController {
       byte[] fingerprint = Util.truncate(digest, 4);
 
       if (!Arrays.equals(fingerprint, element.fingerprint())) {
-        responseElements.add(new BatchIdentityCheckResponse.Element(element.uuid(), element.aci(), identityKey));
+        responseElements.add(new BatchIdentityCheckResponse.Element(element.uuid(), identityKey));
       }
     });
   }
@@ -444,7 +431,7 @@ public class ProfileController {
     return new BaseProfileResponse(account.getIdentityKey(IdentityType.ACI),
         account.getUnidentifiedAccessKey().map(UnidentifiedAccessChecksum::generateFor).orElse(null),
         account.isUnrestrictedUnidentifiedAccess(),
-        UserCapabilities.createForAccount(account),
+        getAccountCapabilities(account),
         profileBadgeConverter.convert(
             HeaderUtils.getAcceptableLanguagesForRequest(containerRequestContext),
             account.getBadges(),
@@ -456,7 +443,7 @@ public class ProfileController {
     return new BaseProfileResponse(account.getIdentityKey(IdentityType.PNI),
         null,
         false,
-        UserCapabilities.createForAccount(account),
+        getAccountCapabilities(account),
         Collections.emptyList(),
         new PniServiceIdentifier(account.getPhoneNumberIdentifier()));
   }
@@ -502,4 +489,9 @@ public class ProfileController {
         now.format(PostPolicyGenerator.AWS_DATE_TIME), policy.second(), signature);
   }
 
+  private static Map<String, Boolean> getAccountCapabilities(final Account account) {
+    return Arrays.stream(DeviceCapability.values())
+        .filter(DeviceCapability::includeInProfile)
+        .collect(Collectors.toMap(DeviceCapability::getName, account::hasCapability));
+  }
 }

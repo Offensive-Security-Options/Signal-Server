@@ -18,10 +18,10 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.function.Predicate;
 import javax.annotation.Nullable;
 import org.apache.commons.lang3.StringUtils;
 import org.signal.libsignal.protocol.IdentityKey;
+import org.signal.libsignal.zkgroup.backups.BackupCredentialType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.whispersystems.textsecuregcm.auth.SaltedTokenHash;
@@ -29,7 +29,6 @@ import org.whispersystems.textsecuregcm.auth.StoredRegistrationLock;
 import org.whispersystems.textsecuregcm.entities.AccountAttributes;
 import org.whispersystems.textsecuregcm.identity.IdentityType;
 import org.whispersystems.textsecuregcm.identity.ServiceIdentifier;
-import org.whispersystems.textsecuregcm.storage.Device.DeviceCapabilities;
 import org.whispersystems.textsecuregcm.util.ByteArrayBase64UrlAdapter;
 import org.whispersystems.textsecuregcm.util.IdentityKeyAdapter;
 
@@ -116,7 +115,11 @@ public class Account {
 
   @JsonProperty("bcr")
   @Nullable
-  private byte[] backupCredentialRequest;
+  private byte[] messagesBackupCredentialRequest;
+
+  @JsonProperty("mbcr")
+  @Nullable
+  private byte[] mediaBackupCredentialRequest;
 
   @JsonProperty("bv")
   @Nullable
@@ -274,33 +277,14 @@ public class Account {
     return devices.stream().filter(device -> device.getId() == deviceId).findFirst();
   }
 
-  public boolean isStorageSupported() {
+  public boolean hasCapability(final DeviceCapability capability) {
     requireNotStale();
 
-    return devices.stream().anyMatch(device -> device.getCapabilities() != null && device.getCapabilities().storage());
-  }
-
-  public boolean isTransferSupported() {
-    requireNotStale();
-
-    return Optional.ofNullable(getPrimaryDevice().getCapabilities())
-        .map(Device.DeviceCapabilities::transfer)
-        .orElse(false);
-  }
-
-  public boolean isDeleteSyncSupported() {
-    return allDevicesHaveCapability(DeviceCapabilities::deleteSync);
-  }
-
-  public boolean isVersionedExpirationTimerSupported() {
-    return allDevicesHaveCapability(DeviceCapabilities::versionedExpirationTimer);
-  }
-
-  private boolean allDevicesHaveCapability(final Predicate<DeviceCapabilities> predicate) {
-    requireNotStale();
-
-    return devices.stream()
-        .allMatch(device -> device.getCapabilities() != null && predicate.test(device.getCapabilities()));
+    return switch (capability.getAccountCapabilityMode()) {
+      case PRIMARY_DEVICE -> getPrimaryDevice().hasCapability(capability);
+      case ANY_DEVICE -> devices.stream().anyMatch(device -> device.hasCapability(capability));
+      case ALL_DEVICES -> devices.stream().allMatch(device -> device.hasCapability(capability));
+    };
   }
 
   public byte getNextDeviceId() {
@@ -377,7 +361,7 @@ public class Account {
     boolean added = false;
     for (int i = 0; i < badges.size(); i++) {
       final AccountBadge badgeInList = badges.get(i);
-      if (Objects.equals(badgeInList.getId(), badge.getId())) {
+      if (Objects.equals(badgeInList.id(), badge.id())) {
         if (added) {
           badges.remove(i);
           i--;
@@ -399,14 +383,14 @@ public class Account {
     requireNotStale();
 
     // early exit if it's already the first item in the list
-    if (!badges.isEmpty() && Objects.equals(badges.get(0).getId(), badgeId)) {
+    if (!badges.isEmpty() && Objects.equals(badges.get(0).id(), badgeId)) {
       purgeStaleBadges(clock);
       return;
     }
 
     int indexOfBadge = -1;
     for (int i = 1; i < badges.size(); i++) {
-      if (Objects.equals(badgeId, badges.get(i).getId())) {
+      if (Objects.equals(badgeId, badges.get(i).id())) {
         indexOfBadge = i;
         break;
       }
@@ -422,13 +406,13 @@ public class Account {
   public void removeBadge(final Clock clock, final String id) {
     requireNotStale();
 
-    badges.removeIf(accountBadge -> Objects.equals(accountBadge.getId(), id));
+    badges.removeIf(accountBadge -> Objects.equals(accountBadge.id(), id));
     purgeStaleBadges(clock);
   }
 
   private void purgeStaleBadges(final Clock clock) {
     final Instant now = clock.instant();
-    badges.removeIf(accountBadge -> now.isAfter(accountBadge.getExpiration()));
+    badges.removeIf(accountBadge -> now.isAfter(accountBadge.expiration()));
   }
 
   public void setRegistrationLockFromAttributes(final AccountAttributes attributes) {
@@ -509,19 +493,33 @@ public class Account {
     this.svr3ShareSet = svr3ShareSet;
   }
 
-  public byte[] getBackupCredentialRequest() {
-    return backupCredentialRequest;
+  public void setBackupCredentialRequests(final byte[] messagesBackupCredentialRequest,
+      final byte[] mediaBackupCredentialRequest) {
+
+    requireNotStale();
+
+    this.messagesBackupCredentialRequest = messagesBackupCredentialRequest;
+    this.mediaBackupCredentialRequest = mediaBackupCredentialRequest;
   }
 
-  public void setBackupCredentialRequest(final byte[] backupCredentialRequest) {
-    this.backupCredentialRequest = backupCredentialRequest;
+  public Optional<byte[]> getBackupCredentialRequest(final BackupCredentialType credentialType) {
+    requireNotStale();
+
+    return Optional.ofNullable(switch (credentialType) {
+      case MESSAGES -> messagesBackupCredentialRequest;
+      case MEDIA -> mediaBackupCredentialRequest;
+    });
   }
 
   public @Nullable BackupVoucher getBackupVoucher() {
+    requireNotStale();
+
     return backupVoucher;
   }
 
   public void setBackupVoucher(final @Nullable BackupVoucher backupVoucher) {
+    requireNotStale();
+
     this.backupVoucher = backupVoucher;
   }
 

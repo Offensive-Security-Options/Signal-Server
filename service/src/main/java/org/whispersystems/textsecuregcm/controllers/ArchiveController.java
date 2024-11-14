@@ -5,11 +5,14 @@
 
 package org.whispersystems.textsecuregcm.controllers;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonValue;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.DeserializationContext;
 import com.fasterxml.jackson.databind.JsonDeserializer;
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import com.google.common.annotations.VisibleForTesting;
 import io.dropwizard.auth.Auth;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -17,42 +20,47 @@ import io.swagger.v3.oas.annotations.media.Content;
 import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.PositiveOrZero;
+import jakarta.validation.constraints.Size;
+import jakarta.ws.rs.BadRequestException;
+import jakarta.ws.rs.ClientErrorException;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.DELETE;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.HeaderParam;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.PUT;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
+import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
 import java.io.IOException;
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
-import javax.validation.Valid;
-import javax.validation.constraints.Max;
-import javax.validation.constraints.Min;
-import javax.validation.constraints.NotBlank;
-import javax.validation.constraints.NotNull;
-import javax.validation.constraints.PositiveOrZero;
-import javax.validation.constraints.Size;
-import javax.ws.rs.BadRequestException;
-import javax.ws.rs.ClientErrorException;
-import javax.ws.rs.Consumes;
-import javax.ws.rs.DELETE;
-import javax.ws.rs.GET;
-import javax.ws.rs.HeaderParam;
-import javax.ws.rs.POST;
-import javax.ws.rs.PUT;
-import javax.ws.rs.Path;
-import javax.ws.rs.Produces;
-import javax.ws.rs.QueryParam;
-import javax.ws.rs.core.MediaType;
-import javax.ws.rs.core.Response;
 import org.signal.libsignal.protocol.ecc.ECPublicKey;
 import org.signal.libsignal.zkgroup.InvalidInputException;
 import org.signal.libsignal.zkgroup.backups.BackupAuthCredentialPresentation;
 import org.signal.libsignal.zkgroup.backups.BackupAuthCredentialRequest;
+import org.signal.libsignal.zkgroup.backups.BackupCredentialType;
 import org.signal.libsignal.zkgroup.receipts.ReceiptCredentialPresentation;
 import org.whispersystems.textsecuregcm.auth.AuthenticatedDevice;
 import org.whispersystems.textsecuregcm.backup.BackupAuthManager;
@@ -60,13 +68,13 @@ import org.whispersystems.textsecuregcm.backup.BackupManager;
 import org.whispersystems.textsecuregcm.backup.CopyParameters;
 import org.whispersystems.textsecuregcm.backup.CopyResult;
 import org.whispersystems.textsecuregcm.backup.MediaEncryptionParameters;
+import org.whispersystems.textsecuregcm.entities.RemoteAttachment;
 import org.whispersystems.textsecuregcm.util.BackupAuthCredentialAdapter;
 import org.whispersystems.textsecuregcm.util.ByteArrayAdapter;
 import org.whispersystems.textsecuregcm.util.ByteArrayBase64UrlAdapter;
 import org.whispersystems.textsecuregcm.util.ECPublicKeyAdapter;
 import org.whispersystems.textsecuregcm.util.ExactlySize;
 import org.whispersystems.textsecuregcm.util.Util;
-import org.whispersystems.textsecuregcm.util.ValidBase64URLString;
 import org.whispersystems.websocket.auth.Mutable;
 import org.whispersystems.websocket.auth.ReadOnly;
 import reactor.core.publisher.Mono;
@@ -90,11 +98,21 @@ public class ArchiveController {
 
   public record SetBackupIdRequest(
       @Schema(description = """
-          A BackupAuthCredentialRequest containing a blinded encrypted backup-id, encoded in standard padded base64
+          A BackupAuthCredentialRequest containing a blinded encrypted backup-id, encoded in standard padded base64.
+          This backup-id should be used for message backups only, and must have the message backup type set on the
+          credential.
           """, implementation = String.class)
       @JsonDeserialize(using = BackupAuthCredentialAdapter.CredentialRequestDeserializer.class)
       @JsonSerialize(using = BackupAuthCredentialAdapter.CredentialRequestSerializer.class)
-      @NotNull BackupAuthCredentialRequest backupAuthCredentialRequest) {}
+      @NotNull BackupAuthCredentialRequest messagesBackupAuthCredentialRequest,
+
+      @Schema(description = """
+          A BackupAuthCredentialRequest containing a blinded encrypted backup-id, encoded in standard padded base64.
+          This backup-id should be used for media only, and must have the media type set on the credential.
+          """, implementation = String.class)
+      @JsonDeserialize(using = BackupAuthCredentialAdapter.CredentialRequestDeserializer.class)
+      @JsonSerialize(using = BackupAuthCredentialAdapter.CredentialRequestSerializer.class)
+      @NotNull BackupAuthCredentialRequest mediaBackupAuthCredentialRequest) {}
 
 
   @PUT
@@ -116,8 +134,10 @@ public class ArchiveController {
   public CompletionStage<Response> setBackupId(
       @Mutable @Auth final AuthenticatedDevice account,
       @Valid @NotNull final SetBackupIdRequest setBackupIdRequest) throws RateLimitExceededException {
+
     return this.backupAuthManager
-        .commitBackupId(account.getAccount(), setBackupIdRequest.backupAuthCredentialRequest)
+        .commitBackupId(account.getAccount(), setBackupIdRequest.messagesBackupAuthCredentialRequest,
+            setBackupIdRequest.mediaBackupAuthCredentialRequest)
         .thenApply(Util.ASYNC_EMPTY_RESPONSE);
   }
 
@@ -167,8 +187,31 @@ public class ArchiveController {
   }
 
   public record BackupAuthCredentialsResponse(
-      @Schema(description = "A list of BackupAuthCredentials and their validity periods")
-      List<BackupAuthCredential> credentials) {
+      @Schema(description = "A map of credential types to lists of BackupAuthCredentials and their validity periods")
+      Map<CredentialType, List<BackupAuthCredential>> credentials) {
+
+    public enum CredentialType {
+      MESSAGES,
+      MEDIA;
+
+      @JsonValue
+      public String toValue() {
+        return this.name().toLowerCase(Locale.ROOT);
+      }
+
+      @JsonCreator
+      public static CredentialType fromValue(String v) {
+        return v == null ? null : CredentialType.valueOf(v.toUpperCase(Locale.ROOT));
+      }
+
+      @VisibleForTesting
+      static CredentialType fromLibsignalType(BackupCredentialType backupCredentialType) {
+        return switch (backupCredentialType) {
+          case MESSAGES -> BackupAuthCredentialsResponse.CredentialType.MESSAGES;
+          case MEDIA -> BackupAuthCredentialsResponse.CredentialType.MEDIA;
+        };
+      }
+    }
 
     public record BackupAuthCredential(
         @Schema(description = "A BackupAuthCredential, encoded in standard padded base64")
@@ -203,14 +246,24 @@ public class ArchiveController {
       @NotNull @QueryParam("redemptionStartSeconds") Long startSeconds,
       @NotNull @QueryParam("redemptionEndSeconds") Long endSeconds) {
 
-    return this.backupAuthManager.getBackupAuthCredentials(
-            auth.getAccount(),
-            Instant.ofEpochSecond(startSeconds), Instant.ofEpochSecond(endSeconds))
-        .thenApply(creds -> new BackupAuthCredentialsResponse(creds.stream()
-            .map(cred -> new BackupAuthCredentialsResponse.BackupAuthCredential(
-                cred.credential().serialize(),
-                cred.redemptionTime().getEpochSecond()))
-            .toList()));
+    final Map<BackupCredentialType, List<BackupAuthCredentialsResponse.BackupAuthCredential>> credentialsByType =
+        new ConcurrentHashMap<>();
+
+    return CompletableFuture.allOf(Arrays.stream(BackupCredentialType.values())
+            .map(credentialType -> this.backupAuthManager.getBackupAuthCredentials(
+                    auth.getAccount(),
+                    credentialType,
+                    Instant.ofEpochSecond(startSeconds), Instant.ofEpochSecond(endSeconds))
+                .thenAccept(credentials -> credentialsByType.put(credentialType, credentials.stream()
+                    .map(credential -> new BackupAuthCredentialsResponse.BackupAuthCredential(
+                        credential.credential().serialize(),
+                        credential.redemptionTime().getEpochSecond()))
+                    .toList())))
+            .toArray(CompletableFuture[]::new))
+        .thenApply(ignored -> new BackupAuthCredentialsResponse(credentialsByType.entrySet().stream()
+            .collect(Collectors.toMap(
+                e -> BackupAuthCredentialsResponse.CredentialType.fromLibsignalType(e.getKey()),
+                Map.Entry::getValue))));
   }
 
 
@@ -228,7 +281,8 @@ public class ArchiveController {
   @ApiResponse(responseCode = "401", description = """
       The provided backup auth credential presentation could not be verified or
       The public key signature was invalid or
-      There is no backup associated with the backup-id in the presentation""")
+      There is no backup associated with the backup-id in the presentation or
+      The credential was of the wrong type (messages/media)""")
   @ApiResponse(responseCode = "400", description = "Bad arguments. The request may have been made on an authenticated channel")
   @interface ApiResponseZkAuth {}
 
@@ -454,23 +508,13 @@ public class ArchiveController {
       throw new BadRequestException("must not use authenticated connection for anonymous operations");
     }
     return backupManager.authenticateBackupUser(presentation.presentation, signature.signature)
-        .thenCompose(backupUser -> backupManager.createTemporaryAttachmentUploadDescriptor(backupUser))
+        .thenCompose(backupManager::createTemporaryAttachmentUploadDescriptor)
         .thenApply(result -> new UploadDescriptorResponse(
             result.cdn(),
             result.key(),
             result.headers(),
             result.signedUploadLocation()));
   }
-
-  public record RemoteAttachment(
-      @Schema(description = "The attachment cdn")
-      @NotNull
-      Integer cdn,
-
-      @NotBlank
-      @ValidBase64URLString
-      @Schema(description = "The attachment key")
-      String key) {}
 
   public record CopyMediaRequest(
       @Schema(description = "The object on the attachment CDN to copy")
@@ -500,19 +544,13 @@ public class ArchiveController {
       @JsonDeserialize(using = ByteArrayAdapter.Deserializing.class)
       @NotNull
       @ExactlySize(32)
-      byte[] encryptionKey,
-
-      @Schema(description = "A 16-byte IV for AES, encoded in standard padded base64", implementation = String.class)
-      @JsonDeserialize(using = ByteArrayAdapter.Deserializing.class)
-      @NotNull
-      @ExactlySize(16)
-      byte[] iv) {
+      byte[] encryptionKey) {
 
     CopyParameters toCopyParameters() {
       return new CopyParameters(
-          sourceAttachment.cdn, sourceAttachment.key,
+          sourceAttachment.cdn(), sourceAttachment.key(),
           objectLength,
-          new MediaEncryptionParameters(encryptionKey, hmacKey, iv),
+          new MediaEncryptionParameters(encryptionKey, hmacKey),
           mediaId);
     }
   }

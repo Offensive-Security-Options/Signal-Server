@@ -3,6 +3,8 @@ package org.whispersystems.textsecuregcm.backup;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import io.micrometer.core.instrument.Metrics;
 import io.micrometer.core.instrument.Timer;
+import jakarta.validation.constraints.NotNull;
+import jakarta.ws.rs.core.Response;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
@@ -19,11 +21,8 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import javax.annotation.Nullable;
-import javax.validation.constraints.NotNull;
-import javax.ws.rs.core.Response;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -129,7 +128,7 @@ public class Cdn3RemoteStorageManager implements RemoteStorageManager {
    * Serialized copy request for cdn3 storage manager
    */
   record Cdn3CopyRequest(
-      String encryptionKey, String hmacKey, String iv,
+      String encryptionKey, String hmacKey,
       SourceDescriptor source, int expectedSourceLength,
       String dst) {
 
@@ -137,7 +136,6 @@ public class Cdn3RemoteStorageManager implements RemoteStorageManager {
         String dst) {
       this(Base64.getEncoder().encodeToString(parameters.aesEncryptionKey().getEncoded()),
           Base64.getEncoder().encodeToString(parameters.hmacSHA256Key().getEncoded()),
-          Base64.getEncoder().encodeToString(parameters.iv().getIV()),
           source, expectedSourceLength, dst);
     }
 

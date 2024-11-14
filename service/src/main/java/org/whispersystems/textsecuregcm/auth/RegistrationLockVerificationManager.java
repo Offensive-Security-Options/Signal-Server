@@ -12,12 +12,12 @@ import io.micrometer.core.instrument.DistributionSummary;
 import io.micrometer.core.instrument.Metrics;
 import io.micrometer.core.instrument.Tag;
 import io.micrometer.core.instrument.Tags;
+import jakarta.ws.rs.WebApplicationException;
+import jakarta.ws.rs.core.Response;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import javax.annotation.Nullable;
-import javax.ws.rs.WebApplicationException;
-import javax.ws.rs.core.Response;
 import org.apache.commons.lang3.StringUtils;
 import org.whispersystems.textsecuregcm.controllers.RateLimitExceededException;
 import org.whispersystems.textsecuregcm.entities.PhoneVerificationRequest;
@@ -25,9 +25,9 @@ import org.whispersystems.textsecuregcm.entities.RegistrationLockFailure;
 import org.whispersystems.textsecuregcm.entities.Svr3Credentials;
 import org.whispersystems.textsecuregcm.limits.RateLimiters;
 import org.whispersystems.textsecuregcm.metrics.UserAgentTagUtil;
-import org.whispersystems.textsecuregcm.push.ClientPresenceManager;
 import org.whispersystems.textsecuregcm.push.NotPushRegisteredException;
 import org.whispersystems.textsecuregcm.push.PushNotificationManager;
+import org.whispersystems.textsecuregcm.push.WebSocketConnectionEventManager;
 import org.whispersystems.textsecuregcm.storage.Account;
 import org.whispersystems.textsecuregcm.storage.AccountsManager;
 import org.whispersystems.textsecuregcm.storage.Device;
@@ -54,7 +54,7 @@ public class RegistrationLockVerificationManager {
   private static final String PHONE_VERIFICATION_TYPE_TAG_NAME = "phoneVerificationType";
 
   private final AccountsManager accounts;
-  private final ClientPresenceManager clientPresenceManager;
+  private final DisconnectionRequestManager disconnectionRequestManager;
   private final ExternalServiceCredentialsGenerator svr2CredentialGenerator;
   private final ExternalServiceCredentialsGenerator svr3CredentialGenerator;
   private final RateLimiters rateLimiters;
@@ -62,14 +62,15 @@ public class RegistrationLockVerificationManager {
   private final PushNotificationManager pushNotificationManager;
 
   public RegistrationLockVerificationManager(
-      final AccountsManager accounts, final ClientPresenceManager clientPresenceManager,
+      final AccountsManager accounts,
+      final DisconnectionRequestManager disconnectionRequestManager,
       final ExternalServiceCredentialsGenerator svr2CredentialGenerator,
       final ExternalServiceCredentialsGenerator svr3CredentialGenerator,
       final RegistrationRecoveryPasswordsManager registrationRecoveryPasswordsManager,
       final PushNotificationManager pushNotificationManager,
       final RateLimiters rateLimiters) {
     this.accounts = accounts;
-    this.clientPresenceManager = clientPresenceManager;
+    this.disconnectionRequestManager = disconnectionRequestManager;
     this.svr2CredentialGenerator = svr2CredentialGenerator;
     this.svr3CredentialGenerator = svr3CredentialGenerator;
     this.registrationRecoveryPasswordsManager = registrationRecoveryPasswordsManager;
@@ -160,7 +161,7 @@ public class RegistrationLockVerificationManager {
       }
 
       final List<Byte> deviceIds = updatedAccount.getDevices().stream().map(Device::getId).toList();
-      clientPresenceManager.disconnectAllPresences(updatedAccount.getUuid(), deviceIds);
+      disconnectionRequestManager.requestDisconnection(updatedAccount.getUuid(), deviceIds);
 
       try {
         // Send a push notification that prompts the client to attempt login and fail due to locked credentials

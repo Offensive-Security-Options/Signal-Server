@@ -7,8 +7,10 @@ package org.whispersystems.textsecuregcm.spam;
 
 import io.dropwizard.configuration.ConfigurationValidationException;
 import io.dropwizard.lifecycle.Managed;
+import jakarta.validation.Validator;
 import java.io.IOException;
-import javax.validation.Validator;
+import java.util.function.Function;
+import org.whispersystems.textsecuregcm.captcha.CaptchaClient;
 import org.whispersystems.textsecuregcm.storage.ReportedMessageListener;
 
 /**
@@ -80,4 +82,13 @@ public interface SpamFilter extends Managed {
    * @return a {@link RegistrationRecoveryChecker} controlled by the spam filter
    */
   RegistrationRecoveryChecker getRegistrationRecoveryChecker();
+
+  /**
+   * Return a function that will be used to lazily fetch the captcha client for a specified scheme. This is to avoid
+   * initialization issues with the spam filter if eagerly fetched.
+   *
+   * @return a {@link Function} that takes the scheme and returns a {@link CaptchaClient}. Returns null if no captcha
+   * client for the scheme exists
+   */
+  Function<String, CaptchaClient> getCaptchaClientSupplier();
 }

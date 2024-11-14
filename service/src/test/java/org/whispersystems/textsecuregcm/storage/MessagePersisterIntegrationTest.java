@@ -32,6 +32,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfiguration;
 import org.whispersystems.textsecuregcm.entities.MessageProtos;
+import org.whispersystems.textsecuregcm.push.PushNotificationManager;
+import org.whispersystems.textsecuregcm.push.WebSocketConnectionEventListener;
+import org.whispersystems.textsecuregcm.push.WebSocketConnectionEventManager;
 import org.whispersystems.textsecuregcm.redis.RedisClusterExtension;
 import org.whispersystems.textsecuregcm.storage.DynamoDbExtensionSchema.Tables;
 import org.whispersystems.textsecuregcm.tests.util.DevicesHelper;
@@ -48,11 +51,12 @@ class MessagePersisterIntegrationTest {
   @RegisterExtension
   static final RedisClusterExtension REDIS_CLUSTER_EXTENSION = RedisClusterExtension.builder().build();
 
-  private ExecutorService notificationExecutorService;
   private Scheduler messageDeliveryScheduler;
   private ExecutorService messageDeletionExecutorService;
+  private ExecutorService websocketConnectionEventExecutor;
   private MessagesCache messagesCache;
   private MessagesManager messagesManager;
+  private WebSocketConnectionEventManager webSocketConnectionEventManager;
   private MessagePersister messagePersister;
   private Account account;
 
@@ -62,7 +66,6 @@ class MessagePersisterIntegrationTest {
   void setUp() throws Exception {
     REDIS_CLUSTER_EXTENSION.getRedisCluster().useCluster(connection -> {
       connection.sync().flushall();
-      connection.sync().upstream().commands().configSet("notify-keyspace-events", "K$glz");
     });
 
     @SuppressWarnings("unchecked") final DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager =
@@ -77,11 +80,19 @@ class MessagePersisterIntegrationTest {
         messageDeletionExecutorService);
     final AccountsManager accountsManager = mock(AccountsManager.class);
 
-    notificationExecutorService = Executors.newSingleThreadExecutor();
-    messagesCache = new MessagesCache(REDIS_CLUSTER_EXTENSION.getRedisCluster(), notificationExecutorService,
+    messagesCache = new MessagesCache(REDIS_CLUSTER_EXTENSION.getRedisCluster(),
         messageDeliveryScheduler, messageDeletionExecutorService, Clock.systemUTC(), dynamicConfigurationManager);
     messagesManager = new MessagesManager(messagesDynamoDb, messagesCache, mock(ReportMessageManager.class),
         messageDeletionExecutorService);
+
+    websocketConnectionEventExecutor = Executors.newVirtualThreadPerTaskExecutor();
+    webSocketConnectionEventManager = new WebSocketConnectionEventManager(mock(AccountsManager.class),
+        mock(PushNotificationManager.class),
+        REDIS_CLUSTER_EXTENSION.getRedisCluster(),
+        websocketConnectionEventExecutor);
+
+    webSocketConnectionEventManager.start();
+
     messagePersister = new MessagePersister(messagesCache, messagesManager, accountsManager,
         dynamicConfigurationManager, PERSIST_DELAY, 1);
 
@@ -95,19 +106,19 @@ class MessagePersisterIntegrationTest {
     when(account.getDevice(Device.PRIMARY_ID)).thenReturn(Optional.of(DevicesHelper.createDevice(Device.PRIMARY_ID)));
 
     when(dynamicConfigurationManager.getConfiguration()).thenReturn(new DynamicConfiguration());
-
-    messagesCache.start();
   }
 
   @AfterEach
   void tearDown() throws Exception {
-    notificationExecutorService.shutdown();
-    notificationExecutorService.awaitTermination(15, TimeUnit.SECONDS);
-
     messageDeletionExecutorService.shutdown();
     messageDeletionExecutorService.awaitTermination(15, TimeUnit.SECONDS);
 
+    websocketConnectionEventExecutor.shutdown();
+    websocketConnectionEventExecutor.awaitTermination(15, TimeUnit.SECONDS);
+
     messageDeliveryScheduler.dispose();
+
+    webSocketConnectionEventManager.stop();
   }
 
   @Test
@@ -136,20 +147,21 @@ class MessagePersisterIntegrationTest {
 
       final AtomicBoolean messagesPersisted = new AtomicBoolean(false);
 
-      messagesManager.addMessageAvailabilityListener(account.getUuid(), Device.PRIMARY_ID,
-          new MessageAvailabilityListener() {
+      webSocketConnectionEventManager.handleClientConnected(account.getUuid(), Device.PRIMARY_ID, new WebSocketConnectionEventListener() {
         @Override
-        public boolean handleNewMessagesAvailable() {
-          return true;
+        public void handleNewMessageAvailable() {
         }
 
         @Override
-        public boolean handleMessagesPersisted() {
+        public void handleMessagesPersisted() {
           synchronized (messagesPersisted) {
             messagesPersisted.set(true);
             messagesPersisted.notifyAll();
-            return true;
           }
+        }
+
+        @Override
+        public void handleConnectionDisplaced(final boolean connectedElsewhere) {
         }
       });
 

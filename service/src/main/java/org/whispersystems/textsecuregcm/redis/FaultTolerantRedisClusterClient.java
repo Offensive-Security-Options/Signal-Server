@@ -75,6 +75,19 @@ public class FaultTolerantRedisClusterClient {
 
     this.name = name;
 
+    // Lettuce will issue a CLIENT SETINFO command unconditionally if these fields are set (and they are by default),
+    // which can generate a bunch of spurious warnings in versions of Redis before 7.2.0.
+    //
+    // See:
+    //
+    // - https://github.com/redis/lettuce/pull/2823
+    // - https://github.com/redis/lettuce/issues/2817
+    redisUris.forEach(redisUri -> {
+      redisUri.setClientName(null);
+      redisUri.setLibraryName(null);
+      redisUri.setLibraryVersion(null);
+    });
+
     final LettuceShardCircuitBreaker lettuceShardCircuitBreaker = new LettuceShardCircuitBreaker(name,
         circuitBreakerConfig.toCircuitBreakerConfig(), Schedulers.newSingle("topology-changed-" + name, true));
     this.clusterClient = RedisClusterClient.create(
@@ -198,8 +211,15 @@ public class FaultTolerantRedisClusterClient {
     final StatefulRedisClusterPubSubConnection<String, String> pubSubConnection = clusterClient.connectPubSub();
     pubSubConnections.add(pubSubConnection);
 
-    return new FaultTolerantPubSubClusterConnection<>(name, pubSubConnection, retry, topologyChangedEventRetry,
+    return new FaultTolerantPubSubClusterConnection<>(name, pubSubConnection, topologyChangedEventRetry,
         Schedulers.newSingle(name + "-redisPubSubEvents", true));
   }
 
+  public FaultTolerantPubSubClusterConnection<byte[], byte[]> createBinaryPubSubConnection() {
+    final StatefulRedisClusterPubSubConnection<byte[], byte[]> pubSubConnection = clusterClient.connectPubSub(ByteArrayCodec.INSTANCE);
+    pubSubConnections.add(pubSubConnection);
+
+    return new FaultTolerantPubSubClusterConnection<>(name, pubSubConnection, topologyChangedEventRetry,
+        Schedulers.newSingle(name + "-redisPubSubEvents", true));
+  }
 }

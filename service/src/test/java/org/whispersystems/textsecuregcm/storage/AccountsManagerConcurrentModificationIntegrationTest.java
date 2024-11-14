@@ -25,10 +25,12 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.LinkedBlockingDeque;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
@@ -42,12 +44,13 @@ import org.mockito.stubbing.Answer;
 import org.signal.libsignal.protocol.IdentityKey;
 import org.signal.libsignal.protocol.ecc.Curve;
 import org.signal.libsignal.protocol.ecc.ECKeyPair;
+import org.whispersystems.textsecuregcm.auth.DisconnectionRequestManager;
 import org.whispersystems.textsecuregcm.auth.SaltedTokenHash;
 import org.whispersystems.textsecuregcm.auth.UnidentifiedAccessUtil;
 import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfiguration;
 import org.whispersystems.textsecuregcm.entities.AccountAttributes;
 import org.whispersystems.textsecuregcm.identity.IdentityType;
-import org.whispersystems.textsecuregcm.push.ClientPresenceManager;
+import org.whispersystems.textsecuregcm.push.WebSocketConnectionEventManager;
 import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClient;
 import org.whispersystems.textsecuregcm.securestorage.SecureStorageClient;
 import org.whispersystems.textsecuregcm.securevaluerecovery.SecureValueRecovery2Client;
@@ -132,11 +135,11 @@ class AccountsManagerConcurrentModificationIntegrationTest {
           mock(ProfilesManager.class),
           mock(SecureStorageClient.class),
           mock(SecureValueRecovery2Client.class),
-          mock(ClientPresenceManager.class),
+          mock(DisconnectionRequestManager.class),
           mock(RegistrationRecoveryPasswordsManager.class),
           mock(ClientPublicKeysManager.class),
           mock(Executor.class),
-          mock(Executor.class),
+          mock(ScheduledExecutorService.class),
           mock(Clock.class),
           "link-device-secret".getBytes(StandardCharsets.UTF_8),
           dynamicConfigurationManager
@@ -161,7 +164,7 @@ class AccountsManagerConcurrentModificationIntegrationTest {
                   null,
                   "password",
                   null,
-                  new Device.DeviceCapabilities(false, false, false, false),
+                  Set.of(),
                   1,
                   2,
                   true,

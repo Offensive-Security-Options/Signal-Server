@@ -9,6 +9,7 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.protobuf.ByteString;
 import io.grpc.Status;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
 import org.signal.chat.profile.Badge;
@@ -16,7 +17,6 @@ import org.signal.chat.profile.BadgeSvg;
 import org.signal.chat.profile.GetExpiringProfileKeyCredentialResponse;
 import org.signal.chat.profile.GetUnversionedProfileResponse;
 import org.signal.chat.profile.GetVersionedProfileResponse;
-import org.signal.chat.profile.UserCapabilities;
 import org.signal.libsignal.protocol.ServiceId;
 import org.signal.libsignal.zkgroup.InvalidInputException;
 import org.signal.libsignal.zkgroup.VerificationFailedException;
@@ -24,9 +24,9 @@ import org.signal.libsignal.zkgroup.profiles.ExpiringProfileKeyCredentialRespons
 import org.signal.libsignal.zkgroup.profiles.ServerZkProfileOperations;
 import org.whispersystems.textsecuregcm.auth.UnidentifiedAccessChecksum;
 import org.whispersystems.textsecuregcm.badges.ProfileBadgeConverter;
-import org.whispersystems.textsecuregcm.identity.AciServiceIdentifier;
 import org.whispersystems.textsecuregcm.identity.ServiceIdentifier;
 import org.whispersystems.textsecuregcm.storage.Account;
+import org.whispersystems.textsecuregcm.storage.DeviceCapability;
 import org.whispersystems.textsecuregcm.storage.ProfilesManager;
 import org.whispersystems.textsecuregcm.storage.VersionedProfile;
 import org.whispersystems.textsecuregcm.util.ProfileHelper;
@@ -80,11 +80,12 @@ public class ProfileGrpcHelper {
   }
 
   @VisibleForTesting
-  static UserCapabilities buildUserCapabilities(final org.whispersystems.textsecuregcm.entities.UserCapabilities capabilities) {
-    return UserCapabilities.newBuilder()
-        .setDeleteSync(capabilities.deleteSync())
-        .setVersionedExpirationTimer(capabilities.versionedExpirationTimer())
-        .build();
+  static List<org.signal.chat.common.DeviceCapability> buildAccountCapabilities(final Account account) {
+    return Arrays.stream(DeviceCapability.values())
+        .filter(DeviceCapability::includeInProfile)
+        .filter(account::hasCapability)
+        .map(DeviceCapabilityUtil::toGrpcDeviceCapability)
+        .toList();
   }
 
   private static List<BadgeSvg> buildBadgeSvgs(final List<org.whispersystems.textsecuregcm.entities.BadgeSvg> badgeSvgs) {
@@ -105,7 +106,7 @@ public class ProfileGrpcHelper {
       final ProfileBadgeConverter profileBadgeConverter) {
     final GetUnversionedProfileResponse.Builder responseBuilder = GetUnversionedProfileResponse.newBuilder()
         .setIdentityKey(ByteString.copyFrom(targetAccount.getIdentityKey(targetIdentifier.identityType()).serialize()))
-        .setCapabilities(buildUserCapabilities(org.whispersystems.textsecuregcm.entities.UserCapabilities.createForAccount(targetAccount)));
+        .addAllCapabilities(buildAccountCapabilities(targetAccount));
 
     switch (targetIdentifier.identityType()) {
       case ACI -> {
@@ -113,7 +114,7 @@ public class ProfileGrpcHelper {
             .addAllBadges(buildBadges(profileBadgeConverter.convert(
                 RequestAttributesUtil.getAvailableAcceptedLocales(),
                 targetAccount.getBadges(),
-                ProfileHelper.isSelfProfileRequest(requesterUuid, (AciServiceIdentifier) targetIdentifier))));
+                ProfileHelper.isSelfProfileRequest(requesterUuid, targetIdentifier))));
 
         targetAccount.getUnidentifiedAccessKey()
             .map(UnidentifiedAccessChecksum::generateFor)

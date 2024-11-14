@@ -6,7 +6,6 @@
 package org.whispersystems.textsecuregcm.grpc;
 
 import static org.assertj.core.api.AssertionsForClassTypes.assertThatNoException;
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -53,7 +52,6 @@ import org.signal.libsignal.protocol.ServiceId;
 import org.signal.libsignal.protocol.ecc.Curve;
 import org.signal.libsignal.protocol.ecc.ECKeyPair;
 import org.signal.libsignal.zkgroup.InvalidInputException;
-import org.signal.libsignal.zkgroup.ServerPublicParams;
 import org.signal.libsignal.zkgroup.ServerSecretParams;
 import org.signal.libsignal.zkgroup.VerificationFailedException;
 import org.signal.libsignal.zkgroup.profiles.ClientZkProfileOperations;
@@ -62,21 +60,19 @@ import org.signal.libsignal.zkgroup.profiles.ProfileKey;
 import org.signal.libsignal.zkgroup.profiles.ProfileKeyCommitment;
 import org.signal.libsignal.zkgroup.profiles.ProfileKeyCredentialRequest;
 import org.signal.libsignal.zkgroup.profiles.ProfileKeyCredentialRequestContext;
-import org.signal.libsignal.zkgroup.profiles.ServerZkProfileOperations;
 import org.whispersystems.textsecuregcm.auth.UnidentifiedAccessChecksum;
 import org.whispersystems.textsecuregcm.auth.UnidentifiedAccessUtil;
 import org.whispersystems.textsecuregcm.badges.ProfileBadgeConverter;
 import org.whispersystems.textsecuregcm.entities.Badge;
 import org.whispersystems.textsecuregcm.entities.BadgeSvg;
-import org.whispersystems.textsecuregcm.entities.UserCapabilities;
 import org.whispersystems.textsecuregcm.identity.AciServiceIdentifier;
 import org.whispersystems.textsecuregcm.storage.Account;
 import org.whispersystems.textsecuregcm.storage.AccountsManager;
+import org.whispersystems.textsecuregcm.storage.DeviceCapability;
 import org.whispersystems.textsecuregcm.storage.ProfilesManager;
 import org.whispersystems.textsecuregcm.storage.VersionedProfile;
 import org.whispersystems.textsecuregcm.tests.util.AuthHelper;
 import org.whispersystems.textsecuregcm.tests.util.ProfileTestHelper;
-import org.whispersystems.textsecuregcm.util.TestClock;
 import org.whispersystems.textsecuregcm.util.TestRandomUtil;
 import org.whispersystems.textsecuregcm.util.UUIDUtil;
 import org.whispersystems.textsecuregcm.util.ua.UnrecognizedUserAgentException;
@@ -143,6 +139,8 @@ public class ProfileAnonymousGrpcServiceTest extends SimpleBaseGrpcTest<ProfileA
     when(account.isUnrestrictedUnidentifiedAccess()).thenReturn(false);
     when(account.getUnidentifiedAccessKey()).thenReturn(Optional.of(unidentifiedAccessKey));
     when(account.getIdentityKey(org.whispersystems.textsecuregcm.identity.IdentityType.ACI)).thenReturn(identityKey);
+    when(account.hasCapability(any())).thenReturn(false);
+    when(account.hasCapability(DeviceCapability.DELETE_SYNC)).thenReturn(true);
     when(accountsManager.getByServiceIdentifierAsync(serviceIdentifier)).thenReturn(CompletableFuture.completedFuture(Optional.of(account)));
 
     final GetUnversionedProfileAnonymousRequest request = GetUnversionedProfileAnonymousRequest.newBuilder()
@@ -162,7 +160,7 @@ public class ProfileAnonymousGrpcServiceTest extends SimpleBaseGrpcTest<ProfileA
         .setIdentityKey(ByteString.copyFrom(identityKey.serialize()))
         .setUnidentifiedAccess(ByteString.copyFrom(unidentifiedAccessChecksum))
         .setUnrestrictedUnidentifiedAccess(false)
-        .setCapabilities(ProfileGrpcHelper.buildUserCapabilities(UserCapabilities.createForAccount(account)))
+        .addCapabilities(org.signal.chat.common.DeviceCapability.DEVICE_CAPABILITY_DELETE_SYNC)
         .addAllBadges(ProfileGrpcHelper.buildBadges(badges))
         .build();
 
@@ -214,7 +212,7 @@ public class ProfileAnonymousGrpcServiceTest extends SimpleBaseGrpcTest<ProfileA
     final GetUnversionedProfileResponse expectedResponse = GetUnversionedProfileResponse.newBuilder()
         .setIdentityKey(ByteString.copyFrom(identityKey.serialize()))
         .setUnrestrictedUnidentifiedAccess(false)
-        .setCapabilities(ProfileGrpcHelper.buildUserCapabilities(UserCapabilities.createForAccount(account)))
+        .addAllCapabilities(ProfileGrpcHelper.buildAccountCapabilities(account))
         .addAllBadges(ProfileGrpcHelper.buildBadges(badges))
         .build();
 

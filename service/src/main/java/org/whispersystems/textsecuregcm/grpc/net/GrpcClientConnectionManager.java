@@ -9,16 +9,19 @@ import io.netty.handler.codec.http.websocketx.CloseWebSocketFrame;
 import io.netty.util.AttributeKey;
 import java.net.InetAddress;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import javax.annotation.Nullable;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.whispersystems.textsecuregcm.auth.DisconnectionRequestListener;
 import org.whispersystems.textsecuregcm.auth.grpc.AuthenticatedDevice;
 import org.whispersystems.textsecuregcm.util.ua.UnrecognizedUserAgentException;
 import org.whispersystems.textsecuregcm.util.ua.UserAgent;
@@ -30,14 +33,14 @@ import org.whispersystems.textsecuregcm.util.ua.UserAgentUtil;
  * authenticated identity of the device that opened the connection (for non-anonymous connections). It can also close
  * connections associated with a given device if that device's credentials have changed and clients must reauthenticate.
  */
-public class ClientConnectionManager {
+public class GrpcClientConnectionManager implements DisconnectionRequestListener {
 
   private final Map<LocalAddress, Channel> remoteChannelsByLocalAddress = new ConcurrentHashMap<>();
   private final Map<AuthenticatedDevice, List<Channel>> remoteChannelsByAuthenticatedDevice = new ConcurrentHashMap<>();
 
   @VisibleForTesting
   static final AttributeKey<AuthenticatedDevice> AUTHENTICATED_DEVICE_ATTRIBUTE_KEY =
-      AttributeKey.valueOf(ClientConnectionManager.class, "authenticatedDevice");
+      AttributeKey.valueOf(GrpcClientConnectionManager.class, "authenticatedDevice");
 
   @VisibleForTesting
   static final AttributeKey<InetAddress> REMOTE_ADDRESS_ATTRIBUTE_KEY =
@@ -55,7 +58,7 @@ public class ClientConnectionManager {
   static final AttributeKey<List<Locale.LanguageRange>> ACCEPT_LANGUAGE_ATTRIBUTE_KEY =
       AttributeKey.valueOf(WebsocketHandshakeCompleteHandler.class, "acceptLanguage");
 
-  private static final Logger log = LoggerFactory.getLogger(ClientConnectionManager.class);
+  private static final Logger log = LoggerFactory.getLogger(GrpcClientConnectionManager.class);
 
   /**
    * Returns the authenticated device associated with the given local address, if any. An authenticated device is
@@ -154,13 +157,13 @@ public class ClientConnectionManager {
       @Nullable final String userAgentHeader,
       @Nullable final String acceptLanguageHeader) {
 
-    channel.attr(ClientConnectionManager.REMOTE_ADDRESS_ATTRIBUTE_KEY).set(preferredRemoteAddress);
+    channel.attr(GrpcClientConnectionManager.REMOTE_ADDRESS_ATTRIBUTE_KEY).set(preferredRemoteAddress);
 
     if (StringUtils.isNotBlank(userAgentHeader)) {
-      channel.attr(ClientConnectionManager.RAW_USER_AGENT_ATTRIBUTE_KEY).set(userAgentHeader);
+      channel.attr(GrpcClientConnectionManager.RAW_USER_AGENT_ATTRIBUTE_KEY).set(userAgentHeader);
 
       try {
-        channel.attr(ClientConnectionManager.PARSED_USER_AGENT_ATTRIBUTE_KEY)
+        channel.attr(GrpcClientConnectionManager.PARSED_USER_AGENT_ATTRIBUTE_KEY)
             .set(UserAgentUtil.parseUserAgentString(userAgentHeader));
       } catch (final UnrecognizedUserAgentException ignored) {
       }
@@ -168,7 +171,7 @@ public class ClientConnectionManager {
 
     if (StringUtils.isNotBlank(acceptLanguageHeader)) {
       try {
-        channel.attr(ClientConnectionManager.ACCEPT_LANGUAGE_ATTRIBUTE_KEY).set(Locale.LanguageRange.parse(acceptLanguageHeader));
+        channel.attr(GrpcClientConnectionManager.ACCEPT_LANGUAGE_ATTRIBUTE_KEY).set(Locale.LanguageRange.parse(acceptLanguageHeader));
       } catch (final IllegalArgumentException e) {
         log.debug("Invalid Accept-Language header from User-Agent {}: {}", userAgentHeader, acceptLanguageHeader, e);
       }
@@ -188,7 +191,7 @@ public class ClientConnectionManager {
       @SuppressWarnings("OptionalUsedAsFieldOrParameterType") final Optional<AuthenticatedDevice> maybeAuthenticatedDevice) {
 
     maybeAuthenticatedDevice.ifPresent(authenticatedDevice ->
-        remoteChannel.attr(ClientConnectionManager.AUTHENTICATED_DEVICE_ATTRIBUTE_KEY).set(authenticatedDevice));
+        remoteChannel.attr(GrpcClientConnectionManager.AUTHENTICATED_DEVICE_ATTRIBUTE_KEY).set(authenticatedDevice));
 
     remoteChannelsByLocalAddress.put(localChannel.localAddress(), remoteChannel);
 
@@ -214,5 +217,12 @@ public class ClientConnectionManager {
             return existingChannelList.isEmpty() ? null : existingChannelList;
           }));
     });
+  }
+
+  @Override
+  public void handleDisconnectionRequest(final UUID accountIdentifier, final Collection<Byte> deviceIds) {
+    deviceIds.stream()
+        .map(deviceId -> new AuthenticatedDevice(accountIdentifier, deviceId))
+        .forEach(this::closeConnection);
   }
 }

@@ -13,6 +13,14 @@ import io.dropwizard.auth.Auth;
 import io.micrometer.core.instrument.Metrics;
 import io.micrometer.core.instrument.Tags;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.ws.rs.BadRequestException;
+import jakarta.ws.rs.DefaultValue;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.HeaderParam;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
+import jakarta.ws.rs.core.MediaType;
 import java.security.InvalidKeyException;
 import java.time.Clock;
 import java.time.Duration;
@@ -22,16 +30,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import javax.annotation.Nonnull;
-import javax.ws.rs.BadRequestException;
-import javax.ws.rs.DefaultValue;
-import javax.ws.rs.GET;
-import javax.ws.rs.HeaderParam;
-import javax.ws.rs.Path;
-import javax.ws.rs.Produces;
-import javax.ws.rs.QueryParam;
-import javax.ws.rs.WebApplicationException;
-import javax.ws.rs.core.MediaType;
-import javax.ws.rs.core.Response;
 import org.signal.libsignal.protocol.ServiceId;
 import org.signal.libsignal.zkgroup.GenericServerSecretParams;
 import org.signal.libsignal.zkgroup.auth.AuthCredentialWithPniResponse;
@@ -41,7 +39,6 @@ import org.whispersystems.textsecuregcm.auth.AuthenticatedDevice;
 import org.whispersystems.textsecuregcm.auth.CertificateGenerator;
 import org.whispersystems.textsecuregcm.entities.DeliveryCertificate;
 import org.whispersystems.textsecuregcm.entities.GroupCredentials;
-import org.whispersystems.textsecuregcm.identity.IdentityType;
 import org.whispersystems.textsecuregcm.metrics.UserAgentTagUtil;
 import org.whispersystems.websocket.auth.ReadOnly;
 
@@ -79,10 +76,6 @@ public class CertificateController {
   public DeliveryCertificate getDeliveryCertificate(@ReadOnly @Auth AuthenticatedDevice auth,
       @QueryParam("includeE164") @DefaultValue("true") boolean includeE164)
       throws InvalidKeyException {
-
-    if (auth.getAccount().getIdentityKey(IdentityType.ACI) == null) {
-      throw new WebApplicationException(Response.Status.BAD_REQUEST);
-    }
 
     Metrics.counter(GENERATE_DELIVERY_CERTIFICATE_COUNTER_NAME, INCLUDE_E164_TAG_NAME, String.valueOf(includeE164))
         .increment();

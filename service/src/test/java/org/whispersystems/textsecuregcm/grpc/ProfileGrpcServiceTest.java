@@ -86,7 +86,6 @@ import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicPaymentsCon
 import org.whispersystems.textsecuregcm.controllers.RateLimitExceededException;
 import org.whispersystems.textsecuregcm.entities.Badge;
 import org.whispersystems.textsecuregcm.entities.BadgeSvg;
-import org.whispersystems.textsecuregcm.entities.UserCapabilities;
 import org.whispersystems.textsecuregcm.identity.AciServiceIdentifier;
 import org.whispersystems.textsecuregcm.identity.PniServiceIdentifier;
 import org.whispersystems.textsecuregcm.limits.RateLimiter;
@@ -95,6 +94,7 @@ import org.whispersystems.textsecuregcm.s3.PolicySigner;
 import org.whispersystems.textsecuregcm.s3.PostPolicyGenerator;
 import org.whispersystems.textsecuregcm.storage.Account;
 import org.whispersystems.textsecuregcm.storage.AccountsManager;
+import org.whispersystems.textsecuregcm.storage.DeviceCapability;
 import org.whispersystems.textsecuregcm.storage.DynamicConfigurationManager;
 import org.whispersystems.textsecuregcm.storage.ProfilesManager;
 import org.whispersystems.textsecuregcm.storage.VersionedProfile;
@@ -426,6 +426,8 @@ public class ProfileGrpcServiceTest extends SimpleBaseGrpcTest<ProfileGrpcServic
     when(account.isUnrestrictedUnidentifiedAccess()).thenReturn(true);
     when(account.getUnidentifiedAccessKey()).thenReturn(Optional.of(unidentifiedAccessKey));
     when(account.getBadges()).thenReturn(Collections.emptyList());
+    when(account.hasCapability(any())).thenReturn(false);
+    when(account.hasCapability(DeviceCapability.DELETE_SYNC)).thenReturn(true);
     when(profileBadgeConverter.convert(any(), any(), anyBoolean())).thenReturn(badges);
     when(accountsManager.getByServiceIdentifierAsync(any())).thenReturn(CompletableFuture.completedFuture(Optional.of(account)));
 
@@ -436,7 +438,7 @@ public class ProfileGrpcServiceTest extends SimpleBaseGrpcTest<ProfileGrpcServic
         .setIdentityKey(ByteString.copyFrom(identityKey.serialize()))
         .setUnidentifiedAccess(ByteString.copyFrom(unidentifiedAccessChecksum))
         .setUnrestrictedUnidentifiedAccess(true)
-        .setCapabilities(ProfileGrpcHelper.buildUserCapabilities(UserCapabilities.createForAccount(account)))
+        .addCapabilities(org.signal.chat.common.DeviceCapability.DEVICE_CAPABILITY_DELETE_SYNC)
         .addAllBadges(ProfileGrpcHelper.buildBadges(badges))
         .build();
 
@@ -564,7 +566,7 @@ public class ProfileGrpcServiceTest extends SimpleBaseGrpcTest<ProfileGrpcServic
 
   @Test
   void getVersionedProfileRatelimited() {
-    final Duration retryAfterDuration = MockUtils.updateRateLimiterResponseToFail(rateLimiter, AUTHENTICATED_ACI, Duration.ofMinutes(7), false);
+    final Duration retryAfterDuration = MockUtils.updateRateLimiterResponseToFail(rateLimiter, AUTHENTICATED_ACI, Duration.ofMinutes(7));
 
     final GetVersionedProfileRequest request = GetVersionedProfileRequest.newBuilder()
         .setAccountIdentifier(ServiceIdentifier.newBuilder()
@@ -646,7 +648,7 @@ public class ProfileGrpcServiceTest extends SimpleBaseGrpcTest<ProfileGrpcServic
   @Test
   void getExpiringProfileKeyCredentialRateLimited() {
     final Duration retryAfterDuration = MockUtils.updateRateLimiterResponseToFail(
-        rateLimiter, AUTHENTICATED_ACI, Duration.ofMinutes(5), false);
+        rateLimiter, AUTHENTICATED_ACI, Duration.ofMinutes(5));
     when(accountsManager.getByServiceIdentifierAsync(any())).thenReturn(CompletableFuture.completedFuture(Optional.of(account)));
 
     final GetExpiringProfileKeyCredentialRequest request = GetExpiringProfileKeyCredentialRequest.newBuilder()

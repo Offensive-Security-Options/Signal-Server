@@ -7,30 +7,33 @@ package org.whispersystems.textsecuregcm.controllers;
 import io.dropwizard.auth.Auth;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotNull;
+import jakarta.ws.rs.BadRequestException;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.DELETE;
+import jakarta.ws.rs.ForbiddenException;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.HEAD;
+import jakarta.ws.rs.HeaderParam;
+import jakarta.ws.rs.NotFoundException;
+import jakarta.ws.rs.PUT;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
+import jakarta.ws.rs.WebApplicationException;
+import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.Response.Status;
 import java.util.Base64;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import javax.annotation.Nullable;
-import javax.validation.Valid;
-import javax.validation.constraints.NotNull;
-import javax.ws.rs.BadRequestException;
-import javax.ws.rs.Consumes;
-import javax.ws.rs.DELETE;
-import javax.ws.rs.GET;
-import javax.ws.rs.HEAD;
-import javax.ws.rs.HeaderParam;
-import javax.ws.rs.NotFoundException;
-import javax.ws.rs.PUT;
-import javax.ws.rs.Path;
-import javax.ws.rs.PathParam;
-import javax.ws.rs.Produces;
-import javax.ws.rs.WebApplicationException;
-import javax.ws.rs.core.MediaType;
-import javax.ws.rs.core.Response;
-import javax.ws.rs.core.Response.Status;
 import org.signal.libsignal.usernames.BaseUsernameException;
 import org.whispersystems.textsecuregcm.auth.AccountAndAuthenticatedDeviceHolder;
 import org.whispersystems.textsecuregcm.auth.AuthenticatedDevice;
@@ -57,6 +60,7 @@ import org.whispersystems.textsecuregcm.limits.RateLimiters;
 import org.whispersystems.textsecuregcm.storage.Account;
 import org.whispersystems.textsecuregcm.storage.AccountsManager;
 import org.whispersystems.textsecuregcm.storage.Device;
+import org.whispersystems.textsecuregcm.storage.DeviceCapability;
 import org.whispersystems.textsecuregcm.storage.RegistrationRecoveryPasswordsManager;
 import org.whispersystems.textsecuregcm.storage.UsernameHashNotAvailableException;
 import org.whispersystems.textsecuregcm.storage.UsernameReservationNotFoundException;
@@ -192,10 +196,39 @@ public class AccountController {
 
   @PUT
   @Path("/name/")
-  public void setName(@Mutable @Auth AuthenticatedDevice auth, @NotNull @Valid DeviceName deviceName) {
-    Account account = auth.getAccount();
-    Device device = auth.getAuthenticatedDevice();
-    accounts.updateDevice(account, device.getId(), d -> d.setName(deviceName.getDeviceName()));
+  @Operation(summary = "Set a device's encrypted name",
+  description = """
+      Sets the encrypted name for the specified device. Primary devices may change the name of any device associated
+      with their account, but linked devices may only change their own name. If no device ID is specified, then the
+      authenticated device's ID will be used.
+      """)
+  @ApiResponse(responseCode = "204", description = "Device name changed successfully")
+  @ApiResponse(responseCode = "404", description = "No device found with the given ID")
+  @ApiResponse(responseCode = "403", description = "Not authorized to change the name of the device with the given ID")
+  public void setName(@Mutable @Auth final AuthenticatedDevice auth,
+      @NotNull @Valid final DeviceName deviceName,
+
+      @Nullable
+      @QueryParam("deviceId")
+      @Schema(description = "The ID of the device for which to set a name; if omitted, the authenticated device will be targeted for a name change",
+          requiredMode = Schema.RequiredMode.NOT_REQUIRED)
+      final Byte deviceId) {
+
+    final Account account = auth.getAccount();
+    final byte targetDeviceId = deviceId == null ? auth.getAuthenticatedDevice().getId() : deviceId;
+
+    if (account.getDevice(targetDeviceId).isEmpty()) {
+      throw new NotFoundException();
+    }
+
+    final boolean mayChangeName = auth.getAuthenticatedDevice().isPrimary() ||
+        auth.getAuthenticatedDevice().getId() == targetDeviceId;
+
+    if (!mayChangeName) {
+      throw new ForbiddenException();
+    }
+
+    accounts.updateDevice(account, targetDeviceId, d -> d.setName(deviceName.deviceName()));
   }
 
   @PUT
@@ -250,7 +283,7 @@ public class AccountController {
         auth.getAccount().getPhoneNumberIdentifier(),
         auth.getAccount().getUsernameHash().filter(h -> h.length > 0).orElse(null),
         auth.getAccount().getUsernameLinkHandle(),
-        auth.getAccount().isStorageSupported());
+        auth.getAccount().hasCapability(DeviceCapability.STORAGE));
   }
 
   @DELETE

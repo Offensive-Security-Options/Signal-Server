@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.google.i18n.phonenumbers.PhoneNumberUtil;
@@ -19,10 +20,12 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import org.apache.commons.lang3.RandomStringUtils;
@@ -35,6 +38,7 @@ import org.junitpioneer.jupiter.cartesian.CartesianTest;
 import org.signal.libsignal.protocol.IdentityKey;
 import org.signal.libsignal.protocol.ecc.Curve;
 import org.signal.libsignal.protocol.ecc.ECKeyPair;
+import org.whispersystems.textsecuregcm.auth.DisconnectionRequestManager;
 import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfiguration;
 import org.whispersystems.textsecuregcm.entities.AccountAttributes;
 import org.whispersystems.textsecuregcm.entities.ApnRegistrationId;
@@ -42,7 +46,6 @@ import org.whispersystems.textsecuregcm.entities.ECSignedPreKey;
 import org.whispersystems.textsecuregcm.entities.GcmRegistrationId;
 import org.whispersystems.textsecuregcm.entities.KEMSignedPreKey;
 import org.whispersystems.textsecuregcm.identity.IdentityType;
-import org.whispersystems.textsecuregcm.push.ClientPresenceManager;
 import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClient;
 import org.whispersystems.textsecuregcm.redis.RedisClusterExtension;
 import org.whispersystems.textsecuregcm.securestorage.SecureStorageClient;
@@ -71,12 +74,12 @@ public class AccountCreationDeletionIntegrationTest {
 
   private static final Clock CLOCK = Clock.fixed(Instant.now(), ZoneId.systemDefault());
 
-  private ExecutorService accountLockExecutor;
-  private ExecutorService clientPresenceExecutor;
+  private ScheduledExecutorService executor;
 
   private AccountsManager accountsManager;
   private KeysManager keysManager;
   private ClientPublicKeysManager clientPublicKeysManager;
+  private DisconnectionRequestManager disconnectionRequestManager;
 
   record DeliveryChannels(boolean fetchesMessages, String apnsToken, String fcmToken) {}
 
@@ -109,13 +112,12 @@ public class AccountCreationDeletionIntegrationTest {
         DynamoDbExtensionSchema.Tables.DELETED_ACCOUNTS.tableName(),
         DynamoDbExtensionSchema.Tables.USED_LINK_DEVICE_TOKENS.tableName());
 
-    accountLockExecutor = Executors.newSingleThreadExecutor();
-    clientPresenceExecutor = Executors.newSingleThreadExecutor();
+    executor = Executors.newSingleThreadScheduledExecutor();
 
     final AccountLockManager accountLockManager = new AccountLockManager(DYNAMO_DB_EXTENSION.getDynamoDbClient(),
         DynamoDbExtensionSchema.Tables.DELETED_ACCOUNTS_LOCK.tableName());
 
-    clientPublicKeysManager = new ClientPublicKeysManager(clientPublicKeys, accountLockManager, accountLockExecutor);
+    clientPublicKeysManager = new ClientPublicKeysManager(clientPublicKeys, accountLockManager, executor);
 
     final SecureStorageClient secureStorageClient = mock(SecureStorageClient.class);
     when(secureStorageClient.deleteStoredData(any())).thenReturn(CompletableFuture.completedFuture(null));
@@ -139,6 +141,9 @@ public class AccountCreationDeletionIntegrationTest {
     when(registrationRecoveryPasswordsManager.removeForNumber(any()))
         .thenReturn(CompletableFuture.completedFuture(null));
 
+    disconnectionRequestManager = mock(DisconnectionRequestManager.class);
+    when(disconnectionRequestManager.requestDisconnection(any())).thenReturn(CompletableFuture.completedFuture(null));
+
     accountsManager = new AccountsManager(
         accounts,
         phoneNumberIdentifiers,
@@ -150,11 +155,11 @@ public class AccountCreationDeletionIntegrationTest {
         profilesManager,
         secureStorageClient,
         svr2Client,
-        mock(ClientPresenceManager.class),
+        disconnectionRequestManager,
         registrationRecoveryPasswordsManager,
         clientPublicKeysManager,
-        accountLockExecutor,
-        clientPresenceExecutor,
+        executor,
+        executor,
         CLOCK,
         "link-device-secret".getBytes(StandardCharsets.UTF_8),
         dynamicConfigurationManager);
@@ -162,14 +167,10 @@ public class AccountCreationDeletionIntegrationTest {
 
   @AfterEach
   void tearDown() throws InterruptedException {
-    accountLockExecutor.shutdown();
-    clientPresenceExecutor.shutdown();
+    executor.shutdown();
 
     //noinspection ResultOfMethodCallIgnored
-    accountLockExecutor.awaitTermination(1, TimeUnit.SECONDS);
-
-    //noinspection ResultOfMethodCallIgnored
-    clientPresenceExecutor.awaitTermination(1, TimeUnit.SECONDS);
+    executor.awaitTermination(1, TimeUnit.SECONDS);
   }
 
   @CartesianTest
@@ -188,18 +189,15 @@ public class AccountCreationDeletionIntegrationTest {
     final byte[] deviceName = RandomStringUtils.randomAlphabetic(16).getBytes(StandardCharsets.UTF_8);
     final String registrationLockSecret = RandomStringUtils.randomAlphanumeric(16);
 
-    final Device.DeviceCapabilities deviceCapabilities = new Device.DeviceCapabilities(
-        ThreadLocalRandom.current().nextBoolean(),
-        ThreadLocalRandom.current().nextBoolean(),
-        ThreadLocalRandom.current().nextBoolean(),
-        ThreadLocalRandom.current().nextBoolean());
+    final Set<DeviceCapability> deviceCapabilities = Set.of();
 
     final AccountAttributes accountAttributes = new AccountAttributes(deliveryChannels.fetchesMessages(),
         registrationId,
         pniRegistrationId,
         deviceName,
         registrationLockSecret,
-        discoverableByPhoneNumber, deviceCapabilities);
+        discoverableByPhoneNumber,
+        deviceCapabilities);
 
     final List<AccountBadge> badges = new ArrayList<>(List.of(new AccountBadge(
         RandomStringUtils.randomAlphabetic(8),
@@ -303,15 +301,14 @@ public class AccountCreationDeletionIntegrationTest {
       final KEMSignedPreKey pniPqLastResortPreKey = KeysHelper.signedKEMPreKey(4, pniKeyPair);
 
       final Account originalAccount = accountsManager.create(number,
-          new AccountAttributes(true, 1, 1, "name".getBytes(StandardCharsets.UTF_8), "registration-lock", false,
-              new Device.DeviceCapabilities(false, false, false, false)),
+          new AccountAttributes(true, 1, 1, "name".getBytes(StandardCharsets.UTF_8), "registration-lock", false, Set.of()),
           Collections.emptyList(),
           new IdentityKey(aciKeyPair.getPublicKey()),
           new IdentityKey(pniKeyPair.getPublicKey()),
           new DeviceSpec(null,
               "password?",
               "OWI",
-              new Device.DeviceCapabilities(false, false, false, false),
+              Set.of(),
               1,
               2,
               true,
@@ -333,11 +330,7 @@ public class AccountCreationDeletionIntegrationTest {
     final byte[] deviceName = RandomStringUtils.randomAlphabetic(16).getBytes(StandardCharsets.UTF_8);
     final String registrationLockSecret = RandomStringUtils.randomAlphanumeric(16);
 
-    final Device.DeviceCapabilities deviceCapabilities = new Device.DeviceCapabilities(
-        ThreadLocalRandom.current().nextBoolean(),
-        ThreadLocalRandom.current().nextBoolean(),
-        ThreadLocalRandom.current().nextBoolean(),
-        ThreadLocalRandom.current().nextBoolean());
+    final Set<DeviceCapability> deviceCapabilities = Set.of();
 
     final AccountAttributes accountAttributes = new AccountAttributes(deliveryChannels.fetchesMessages(),
         registrationId,
@@ -409,6 +402,8 @@ public class AccountCreationDeletionIntegrationTest {
         pniPqLastResortPreKey);
 
     assertEquals(existingAccountUuid, reregisteredAccount.getUuid());
+
+    verify(disconnectionRequestManager).requestDisconnection(existingAccountUuid);
   }
 
   @Test
@@ -424,11 +419,7 @@ public class AccountCreationDeletionIntegrationTest {
     final byte[] deviceName = RandomStringUtils.randomAlphabetic(16).getBytes(StandardCharsets.UTF_8);
     final String registrationLockSecret = RandomStringUtils.randomAlphanumeric(16);
 
-    final Device.DeviceCapabilities deviceCapabilities = new Device.DeviceCapabilities(
-        ThreadLocalRandom.current().nextBoolean(),
-        ThreadLocalRandom.current().nextBoolean(),
-        ThreadLocalRandom.current().nextBoolean(),
-        ThreadLocalRandom.current().nextBoolean());
+    final Set<DeviceCapability> deviceCapabilities = Set.of();
 
     final AccountAttributes accountAttributes = new AccountAttributes(true,
         registrationId,
@@ -486,6 +477,8 @@ public class AccountCreationDeletionIntegrationTest {
     assertFalse(keysManager.getLastResort(account.getUuid(), Device.PRIMARY_ID).join().isPresent());
     assertFalse(keysManager.getLastResort(account.getPhoneNumberIdentifier(), Device.PRIMARY_ID).join().isPresent());
     assertFalse(clientPublicKeysManager.findPublicKey(account.getUuid(), Device.PRIMARY_ID).join().isPresent());
+
+    verify(disconnectionRequestManager).requestDisconnection(aci);
   }
 
   @SuppressWarnings("OptionalUsedAsFieldOrParameterType")
@@ -498,7 +491,7 @@ public class AccountCreationDeletionIntegrationTest {
       final int pniRegistrationId,
       final byte[] deviceName,
       final boolean discoverableByPhoneNumber,
-      final Device.DeviceCapabilities deviceCapabilities,
+      final Set<DeviceCapability> deviceCapabilities,
       final List<AccountBadge> badges,
       final Optional<ApnRegistrationId> maybeApnRegistrationId,
       final Optional<GcmRegistrationId> maybeGcmRegistrationId,

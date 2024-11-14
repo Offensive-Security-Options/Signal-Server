@@ -60,12 +60,13 @@ public class MessagePersisterServiceCommand extends ServerCommand<WhisperServerC
           });
     }
 
-    final MessagePersister messagePersister = new MessagePersister(deps.messagesCache(), deps.messagesManager(),
-        deps.accountsManager(), deps.dynamicConfigurationManager(),
+    final MessagePersister messagePersister = new MessagePersister(deps.messagesCache(),
+        deps.messagesManager(),
+        deps.accountsManager(),
+        deps.dynamicConfigurationManager(),
         Duration.ofMinutes(configuration.getMessageCacheConfiguration().getPersistDelayMinutes()),
         namespace.getInt(WORKER_COUNT));
 
-    environment.lifecycle().manage(deps.messagesCache());
     environment.lifecycle().manage(messagePersister);
 
     MetricsUtil.registerSystemResourceMetrics(environment);

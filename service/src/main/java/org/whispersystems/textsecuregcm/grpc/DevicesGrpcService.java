@@ -8,6 +8,8 @@ package org.whispersystems.textsecuregcm.grpc;
 import com.google.protobuf.ByteString;
 import io.grpc.Status;
 import java.util.Objects;
+import java.util.Set;
+import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 import org.apache.commons.lang3.StringUtils;
 import org.signal.chat.device.ClearPushTokenRequest;
@@ -27,6 +29,7 @@ import org.whispersystems.textsecuregcm.auth.grpc.AuthenticatedDevice;
 import org.whispersystems.textsecuregcm.auth.grpc.AuthenticationUtil;
 import org.whispersystems.textsecuregcm.storage.AccountsManager;
 import org.whispersystems.textsecuregcm.storage.Device;
+import org.whispersystems.textsecuregcm.storage.DeviceCapability;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
@@ -89,6 +92,17 @@ public class DevicesGrpcService extends ReactorDevicesGrpc.DevicesImplBase {
   public Mono<SetDeviceNameResponse> setDeviceName(final SetDeviceNameRequest request) {
     final AuthenticatedDevice authenticatedDevice = AuthenticationUtil.requireAuthenticatedDevice();
 
+    final byte deviceId = DeviceIdUtil.validate(request.getId());
+
+    final boolean mayChangeName = authenticatedDevice.deviceId() == Device.PRIMARY_ID ||
+        authenticatedDevice.deviceId() == deviceId;
+
+    if (!mayChangeName) {
+      throw Status.PERMISSION_DENIED
+          .withDescription("Authenticated device is not authorized to change target device name")
+          .asRuntimeException();
+    }
+
     if (request.getName().isEmpty()) {
       throw Status.INVALID_ARGUMENT.withDescription("Must specify a device name").asRuntimeException();
     }
@@ -100,7 +114,12 @@ public class DevicesGrpcService extends ReactorDevicesGrpc.DevicesImplBase {
 
     return Mono.fromFuture(() -> accountsManager.getByAccountIdentifierAsync(authenticatedDevice.accountIdentifier()))
         .map(maybeAccount -> maybeAccount.orElseThrow(Status.UNAUTHENTICATED::asRuntimeException))
-        .flatMap(account -> Mono.fromFuture(() -> accountsManager.updateDeviceAsync(account, authenticatedDevice.deviceId(),
+        .doOnNext(account -> {
+          if (account.getDevice(deviceId).isEmpty()) {
+            throw Status.NOT_FOUND.withDescription("No device found with given ID").asRuntimeException();
+          }
+        })
+        .flatMap(account -> Mono.fromFuture(() -> accountsManager.updateDeviceAsync(account, deviceId,
             device -> device.setName(request.getName().toByteArray()))))
         .thenReturn(SetDeviceNameResponse.newBuilder().build());
   }
@@ -184,15 +203,15 @@ public class DevicesGrpcService extends ReactorDevicesGrpc.DevicesImplBase {
   public Mono<SetCapabilitiesResponse> setCapabilities(final SetCapabilitiesRequest request) {
     final AuthenticatedDevice authenticatedDevice = AuthenticationUtil.requireAuthenticatedDevice();
 
+    final Set<DeviceCapability> capabilities = request.getCapabilitiesList().stream()
+        .map(DeviceCapabilityUtil::fromGrpcDeviceCapability)
+        .collect(Collectors.toSet());
+
     return Mono.fromFuture(() -> accountsManager.getByAccountIdentifierAsync(authenticatedDevice.accountIdentifier()))
         .map(maybeAccount -> maybeAccount.orElseThrow(Status.UNAUTHENTICATED::asRuntimeException))
         .flatMap(account ->
             Mono.fromFuture(() -> accountsManager.updateDeviceAsync(account, authenticatedDevice.deviceId(),
-                d -> d.setCapabilities(new Device.DeviceCapabilities(
-                    request.getStorage(),
-                    request.getTransfer(),
-                    request.getDeleteSync(),
-                    request.getVersionedExpirationTimer())))))
+                d -> d.setCapabilities(capabilities))))
         .thenReturn(SetCapabilitiesResponse.newBuilder().build());
   }
 }

@@ -18,6 +18,28 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.media.Content;
 import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotEmpty;
+import jakarta.validation.constraints.NotNull;
+import jakarta.ws.rs.BadRequestException;
+import jakarta.ws.rs.ClientErrorException;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.DELETE;
+import jakarta.ws.rs.DefaultValue;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.HeaderParam;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.PUT;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
+import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.core.Context;
+import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.Response.Status;
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
@@ -34,36 +56,10 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
-import javax.validation.Valid;
-import javax.validation.constraints.NotBlank;
-import javax.validation.constraints.NotEmpty;
-import javax.validation.constraints.NotNull;
-import javax.ws.rs.BadRequestException;
-import javax.ws.rs.ClientErrorException;
-import javax.ws.rs.Consumes;
-import javax.ws.rs.DELETE;
-import javax.ws.rs.DefaultValue;
-import javax.ws.rs.GET;
-import javax.ws.rs.HeaderParam;
-import javax.ws.rs.POST;
-import javax.ws.rs.PUT;
-import javax.ws.rs.Path;
-import javax.ws.rs.PathParam;
-import javax.ws.rs.Produces;
-import javax.ws.rs.QueryParam;
-import javax.ws.rs.WebApplicationException;
-import javax.ws.rs.container.ContainerRequestContext;
-import javax.ws.rs.core.Context;
-import javax.ws.rs.core.MediaType;
-import javax.ws.rs.core.Response;
-import javax.ws.rs.core.Response.Status;
 import org.signal.libsignal.zkgroup.receipts.ReceiptCredentialResponse;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.whispersystems.textsecuregcm.auth.AuthenticatedDevice;
 import org.whispersystems.textsecuregcm.backup.BackupManager;
 import org.whispersystems.textsecuregcm.badges.BadgeTranslator;
-import org.whispersystems.textsecuregcm.badges.LevelTranslator;
 import org.whispersystems.textsecuregcm.configuration.OneTimeDonationConfiguration;
 import org.whispersystems.textsecuregcm.configuration.OneTimeDonationCurrencyConfiguration;
 import org.whispersystems.textsecuregcm.configuration.SubscriptionConfiguration;
@@ -98,8 +94,6 @@ import org.whispersystems.websocket.auth.ReadOnly;
 @io.swagger.v3.oas.annotations.tags.Tag(name = "Subscriptions")
 public class SubscriptionController {
 
-  private static final Logger logger = LoggerFactory.getLogger(SubscriptionController.class);
-
   private final Clock clock;
   private final SubscriptionConfiguration subscriptionConfiguration;
   private final OneTimeDonationConfiguration oneTimeDonationConfiguration;
@@ -109,7 +103,6 @@ public class SubscriptionController {
   private final GooglePlayBillingManager googlePlayBillingManager;
   private final AppleAppStoreManager appleAppStoreManager;
   private final BadgeTranslator badgeTranslator;
-  private final LevelTranslator levelTranslator;
   private final BankMandateTranslator bankMandateTranslator;
   static final String RECEIPT_ISSUED_COUNTER_NAME = MetricsUtil.name(SubscriptionController.class, "receiptIssued");
   static final String PROCESSOR_TAG_NAME = "processor";
@@ -126,7 +119,6 @@ public class SubscriptionController {
       @Nonnull GooglePlayBillingManager googlePlayBillingManager,
       @Nonnull AppleAppStoreManager appleAppStoreManager,
       @Nonnull BadgeTranslator badgeTranslator,
-      @Nonnull LevelTranslator levelTranslator,
       @Nonnull BankMandateTranslator bankMandateTranslator) {
     this.subscriptionManager = subscriptionManager;
     this.clock = Objects.requireNonNull(clock);
@@ -137,7 +129,6 @@ public class SubscriptionController {
     this.googlePlayBillingManager = Objects.requireNonNull(googlePlayBillingManager);
     this.appleAppStoreManager = appleAppStoreManager;
     this.badgeTranslator = Objects.requireNonNull(badgeTranslator);
-    this.levelTranslator = Objects.requireNonNull(levelTranslator);
     this.bankMandateTranslator = Objects.requireNonNull(bankMandateTranslator);
   }
 
@@ -188,7 +179,7 @@ public class SubscriptionController {
 
     subscriptionConfiguration.getDonationLevels().forEach((levelId, levelConfig) -> {
       final LevelConfiguration levelConfiguration = new LevelConfiguration(
-          levelTranslator.translate(acceptableLanguages, levelConfig.badge()),
+          "" /* deprecated and unused */,
           badgeTranslator.translate(acceptableLanguages, levelConfig.badge()));
       donationLevels.put(String.valueOf(levelId), levelConfiguration);
     });
@@ -197,7 +188,7 @@ public class SubscriptionController {
         oneTimeDonationConfiguration.boost().badge());
     donationLevels.put(String.valueOf(oneTimeDonationConfiguration.boost().level()),
         new LevelConfiguration(
-            boostBadge.getName(),
+            "" /* deprecated and unused */,
             // NB: the one-time badges are PurchasableBadge, which has a `duration` field
             new PurchasableBadge(
                 boostBadge,
@@ -206,7 +197,7 @@ public class SubscriptionController {
     final Badge giftBadge = badgeTranslator.translate(acceptableLanguages, oneTimeDonationConfiguration.gift().badge());
     donationLevels.put(String.valueOf(oneTimeDonationConfiguration.gift().level()),
         new LevelConfiguration(
-            giftBadge.getName(),
+            "" /* deprecated and unused */,
             new PurchasableBadge(
                 giftBadge,
                 oneTimeDonationConfiguration.gift().expiration())));
@@ -215,7 +206,10 @@ public class SubscriptionController {
         .entrySet().stream()
         .collect(Collectors.toMap(
             e -> String.valueOf(e.getKey()),
-            e -> new BackupLevelConfiguration(BackupManager.MAX_TOTAL_BACKUP_MEDIA_BYTES, e.getValue().playProductId())));
+            e -> new BackupLevelConfiguration(
+                BackupManager.MAX_TOTAL_BACKUP_MEDIA_BYTES,
+                e.getValue().playProductId(),
+                e.getValue().mediaTtl().toDays())));
 
     return new GetSubscriptionConfigurationResponse(buildCurrencyConfiguration(), donationLevels,
         new BackupConfiguration(backupLevels, subscriptionConfiguration.getbackupFreeTierMediaDuration().toDays()),
@@ -509,6 +503,7 @@ public class SubscriptionController {
 
   @Schema(description = "Configuration for a donation level - use to present appropriate client interfaces")
   public record LevelConfiguration(
+      @Deprecated(forRemoval = true) // may be removed after 2025-01-28
       @Schema(description = "The localized name for the level")
       String name,
       @Schema(description = "The displayable badge associated with the level")
@@ -525,7 +520,9 @@ public class SubscriptionController {
       @Schema(description = "The amount of media storage in bytes that a paying subscriber may store")
       long storageAllowanceBytes,
       @Schema(description = "The play billing productID associated with this backup level")
-      String playProductId) {}
+      String playProductId,
+      @Schema(description = "The duration, in days, for which your backed up media is retained on the server after you stop refreshing with a paid credential")
+      long mediaTtlDays) {}
 
   @GET
   @Path("/configuration")

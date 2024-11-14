@@ -66,6 +66,7 @@ braintree:
   supportedCurrenciesByPaymentMethod:
     PAYPAL:
       - usd
+      - xts
   pubSubPublisher:
     type: stub
 
@@ -155,9 +156,6 @@ dynamoDbTables:
 cacheCluster: # Redis server configuration for cache cluster
   type: local
 
-clientPresenceCluster: # Redis server configuration for client presence cluster
-  type: local
-
 pubsub: # Redis server configuration for pubsub cluster
   type: local
 
@@ -235,13 +233,6 @@ messageCache: # Redis server configuration for message store cache
   cluster:
     type: local
 
-awsAttachments: # AWS S3 configuration
-  bucket: aws-attachments
-  credentials:
-    accessKeyId: secret://awsAttachments.accessKey
-    secretAccessKey: secret://awsAttachments.accessSecret
-  region: us-west-2
-
 gcpAttachments: # GCP Storage configuration
   domain: example.com
   email: user@example.cocm
@@ -288,9 +279,6 @@ unidentifiedDelivery:
   privateKey: secret://unidentifiedDelivery.privateKey
   expiresDays: 7
 
-hCaptcha:
-  type: stub
-
 shortCode:
   baseUrl: https://example.com/shortcodes/
 
@@ -331,12 +319,11 @@ callingZkConfig:
 backupsZkConfig:
   serverSecret: secret://backupsZkConfig.serverSecret
 
-appConfig:
-  type: local
-  application: test
-  environment: test
-  configuration: test
-  configPath: test-dynamic.yml
+dynamicConfig:
+  type: static
+  object: |
+    captcha:
+      scoreFloor: 1.0
 
 remoteConfig:
   globalConfig: # keys and values that are given to clients on GET /v1/config
@@ -383,10 +370,11 @@ subscription: # configuration for Stripe subscriptions
   backupLevels:
     201:
       playProductId: EXAMPLE
+      mediaTtl: P30D
       prices: {}
   levels:
     500:
-      badge: EXAMPLE
+      badge: TEST
       prices:
         # list of ISO 4217 currency codes and amounts for the given badge level
         xts:
@@ -400,11 +388,11 @@ oneTimeDonations:
   boost:
     level: 1
     expiration: P90D
-    badge: EXAMPLE
+    badge: TEST
   gift:
     level: 10
     expiration: P90D
-    badge: EXAMPLE
+    badge: TEST
   currencies:
     # ISO 4217 currency codes and amounts in those currencies
     xts:
@@ -468,6 +456,29 @@ keyTransparencyService:
     O/esB2Eaf+QqMPELdFSZQfG2jvp+3WQTZK8fDKHyLr076G3UetEMy867F6fzTSZd
     9Kxq0DY7RCEpdHMCKcOL
     -----END CERTIFICATE-----
+  clientCertificate: |
+    -----BEGIN CERTIFICATE-----
+    MIIDazCCAlOgAwIBAgIUW5lcNWkuynRVc8Rq5pO6mHQBuZAwDQYJKoZIhvcNAQEL
+    BQAwRTELMAkGA1UEBhMCQVUxEzARBgNVBAgMClNvbWUtU3RhdGUxITAfBgNVBAoM
+    GEludGVybmV0IFdpZGdpdHMgUHR5IEx0ZDAeFw0yNDAzMjUwMzE4MTNaFw0yOTAz
+    MjQwMzE4MTNaMEUxCzAJBgNVBAYTAkFVMRMwEQYDVQQIDApTb21lLVN0YXRlMSEw
+    HwYDVQQKDBhJbnRlcm5ldCBXaWRnaXRzIFB0eSBMdGQwggEiMA0GCSqGSIb3DQEB
+    AQUAA4IBDwAwggEKAoIBAQCfH4Um+fv2r4KudhD37/UXp8duRLTmp4XvpBTpDHpD
+    2HF8p2yThVKlJnMkP/9Ey1Rb0vhxO7DCltLdW8IYcxJuHoyMvyhGUEtxxkOZbrk8
+    ciUR9jTZ37x7vXRGj/RxcdlS6iD0MeF0D/LAkImt4T/kiKwDbENrVEnYWJmipCKP
+    ribxWky7HqxDCoYMQr0zatxB3A9mx5stH+H3kbw3CZcm+ugF9ZIKDEVHb0lf28gq
+    llmD120q/vs9YV3rzVL7sBGDqf6olkulvHQJKElZg2rdcHWFcngSlU2BjR04oyuH
+    c/SSiLSB3YB0tdFGta5uorXyV1y7RElPeBfOfvEjsG3TAgMBAAGjUzBRMB0GA1Ud
+    DgQWBBQX+xlgSWWbDjv0SrJ+h67xauJ80zAfBgNVHSMEGDAWgBQX+xlgSWWbDjv0
+    SrJ+h67xauJ80zAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQAw
+    ZG2MCCjscn6h/QOoJU+IDfa68OqLq0I37gMnLMde4yEhAmm//miePIq4Uz9GRJ+h
+    rAmdEnspKgyQ93PjF7Xpk/JdJA4B1bIrsOl/cSwqx2sFhRt8Kt1DHGlGWXqOaHRP
+    UkZ86MyRL3sXly6WkxEYxZJeQaOzMy2XmQh7grzrlTBuSI+0xf7vsRRDipxr6LVQ
+    6qGWyGODLLc2JD1IXj/1HpRVT2LoGGlKMuyxACQAm4oak1vvJ9mGxgfd9AU+eo58
+    O/esB2Eaf+QqMPELdFSZQfG2jvp+3WQTZK8fDKHyLr076G3UetEMy867F6fzTSZd
+    9Kxq0DY7RCEpdHMCKcOL
+    -----END CERTIFICATE-----
+  clientPrivateKey: secret://keyTransparencyService.clientPrivateKey
 
 turn:
   secret: secret://turn.secret
@@ -510,4 +521,3 @@ externalRequestFilter:
     - /example
   permittedInternalRanges:
     - 127.0.0.0/8
-

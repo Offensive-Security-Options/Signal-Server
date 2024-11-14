@@ -34,8 +34,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.mockito.Mockito;
+import org.whispersystems.textsecuregcm.auth.DisconnectionRequestManager;
 import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfiguration;
-import org.whispersystems.textsecuregcm.push.ClientPresenceManager;
 import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClient;
 import org.whispersystems.textsecuregcm.redis.RedisClusterExtension;
 import org.whispersystems.textsecuregcm.securestorage.SecureStorageClient;
@@ -134,6 +134,9 @@ class AccountsManagerUsernameIntegrationTest {
     when(messageManager.clear(any())).thenReturn(CompletableFuture.completedFuture(null));
     when(profileManager.deleteAll(any())).thenReturn(CompletableFuture.completedFuture(null));
 
+    final DisconnectionRequestManager disconnectionRequestManager = mock(DisconnectionRequestManager.class);
+    when(disconnectionRequestManager.requestDisconnection(any())).thenReturn(CompletableFuture.completedFuture(null));
+
     accountsManager = new AccountsManager(
         accounts,
         phoneNumberIdentifiers,
@@ -145,11 +148,11 @@ class AccountsManagerUsernameIntegrationTest {
         profileManager,
         mock(SecureStorageClient.class),
         mock(SecureValueRecovery2Client.class),
-        mock(ClientPresenceManager.class),
+        disconnectionRequestManager,
         mock(RegistrationRecoveryPasswordsManager.class),
         mock(ClientPublicKeysManager.class),
         Executors.newSingleThreadExecutor(),
-        Executors.newSingleThreadExecutor(),
+        Executors.newSingleThreadScheduledExecutor(),
         mock(Clock.class),
         "link-device-secret".getBytes(StandardCharsets.UTF_8),
         dynamicConfigurationManager);

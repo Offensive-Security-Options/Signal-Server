@@ -20,13 +20,14 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
 import javax.annotation.Nullable;
-import org.apache.commons.lang3.RandomStringUtils;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -50,6 +51,7 @@ import org.signal.chat.device.SetPushTokenResponse;
 import org.whispersystems.textsecuregcm.storage.Account;
 import org.whispersystems.textsecuregcm.storage.AccountsManager;
 import org.whispersystems.textsecuregcm.storage.Device;
+import org.whispersystems.textsecuregcm.storage.DeviceCapability;
 import org.whispersystems.textsecuregcm.util.TestRandomUtil;
 
 class DevicesGrpcServiceTest extends SimpleBaseGrpcTest<DevicesGrpcService, DevicesGrpc.DevicesBlockingStub> {
@@ -187,10 +189,64 @@ class DevicesGrpcServiceTest extends SimpleBaseGrpcTest<DevicesGrpcService, Devi
     final byte[] deviceName = TestRandomUtil.nextBytes(128);
 
     final SetDeviceNameResponse ignored = authenticatedServiceStub().setDeviceName(SetDeviceNameRequest.newBuilder()
+        .setId(deviceId)
         .setName(ByteString.copyFrom(deviceName))
         .build());
 
     verify(device).setName(deviceName);
+  }
+
+  @Test
+  void setLinkedDeviceNameFromPrimary() {
+    mockAuthenticationInterceptor().setAuthenticatedDevice(AUTHENTICATED_ACI, Device.PRIMARY_ID);
+
+    final byte deviceId = Device.PRIMARY_ID + 1;
+
+    final Device device = mock(Device.class);
+    when(authenticatedAccount.getDevice(deviceId)).thenReturn(Optional.of(device));
+
+    final byte[] deviceName = TestRandomUtil.nextBytes(128);
+
+    final SetDeviceNameResponse ignored = authenticatedServiceStub().setDeviceName(SetDeviceNameRequest.newBuilder()
+        .setId(deviceId)
+        .setName(ByteString.copyFrom(deviceName))
+        .build());
+
+    verify(device).setName(deviceName);
+  }
+
+  @Test
+  void setPrimaryDeviceNameFromLinkedDevice() {
+    mockAuthenticationInterceptor().setAuthenticatedDevice(AUTHENTICATED_ACI, (byte) (Device.PRIMARY_ID + 1));
+
+    final byte deviceId = Device.PRIMARY_ID;
+
+    final Device device = mock(Device.class);
+    when(authenticatedAccount.getDevice(deviceId)).thenReturn(Optional.of(device));
+
+    final byte[] deviceName = TestRandomUtil.nextBytes(128);
+
+    assertStatusException(Status.PERMISSION_DENIED,
+        () -> authenticatedServiceStub().setDeviceName(SetDeviceNameRequest.newBuilder()
+            .setId(deviceId)
+            .setName(ByteString.copyFrom(deviceName))
+            .build()));
+
+    verify(device, never()).setName(deviceName);
+  }
+
+  @Test
+  void setDeviceNameNotFound() {
+    mockAuthenticationInterceptor().setAuthenticatedDevice(AUTHENTICATED_ACI, Device.PRIMARY_ID);
+    when(authenticatedAccount.getDevice(anyByte())).thenReturn(Optional.empty());
+
+    final byte[] deviceName = TestRandomUtil.nextBytes(128);
+
+    assertStatusException(Status.NOT_FOUND,
+        () -> authenticatedServiceStub().setDeviceName(SetDeviceNameRequest.newBuilder()
+            .setId(Device.PRIMARY_ID + 1)
+            .setName(ByteString.copyFrom(deviceName))
+            .build()));
   }
 
   @ParameterizedTest
@@ -203,11 +259,25 @@ class DevicesGrpcServiceTest extends SimpleBaseGrpcTest<DevicesGrpcService, Devi
   private static Stream<Arguments> setDeviceNameIllegalArgument() {
     return Stream.of(
         // No device name
-        Arguments.of(SetDeviceNameRequest.newBuilder().build()),
+        Arguments.of(SetDeviceNameRequest.newBuilder()
+            .setId(Device.PRIMARY_ID)
+            .build()),
 
         // Excessively-long device name
         Arguments.of(SetDeviceNameRequest.newBuilder()
-            .setName(ByteString.copyFrom(RandomStringUtils.randomAlphanumeric(1024).getBytes(StandardCharsets.UTF_8)))
+            .setId(Device.PRIMARY_ID)
+            .setName(ByteString.copyFrom(TestRandomUtil.nextBytes(1024)))
+            .build()),
+
+        // No device ID
+        Arguments.of(SetDeviceNameRequest.newBuilder()
+            .setName(ByteString.copyFrom(TestRandomUtil.nextBytes(32)))
+            .build()),
+
+        // Out-of-bounds device ID
+        Arguments.of(SetDeviceNameRequest.newBuilder()
+            .setId(Device.MAXIMUM_DEVICE_ID + 1)
+            .setName(ByteString.copyFrom(TestRandomUtil.nextBytes(32)))
             .build())
     );
   }
@@ -372,18 +442,43 @@ class DevicesGrpcServiceTest extends SimpleBaseGrpcTest<DevicesGrpcService, Devi
     final Device device = mock(Device.class);
     when(authenticatedAccount.getDevice(deviceId)).thenReturn(Optional.of(device));
 
-    final SetCapabilitiesResponse ignored = authenticatedServiceStub().setCapabilities(SetCapabilitiesRequest.newBuilder()
-            .setStorage(storage)
-            .setTransfer(transfer)
-            .setDeleteSync(deleteSync)
-            .setVersionedExpirationTimer(versionedExpirationTimer)
-        .build());
+    final SetCapabilitiesRequest.Builder requestBuilder = SetCapabilitiesRequest.newBuilder();
 
-    final Device.DeviceCapabilities expectedCapabilities = new Device.DeviceCapabilities(
-        storage,
-        transfer,
-        deleteSync,
-        versionedExpirationTimer);
+    if (storage) {
+      requestBuilder.addCapabilities(org.signal.chat.common.DeviceCapability.DEVICE_CAPABILITY_STORAGE);
+    }
+
+    if (transfer) {
+      requestBuilder.addCapabilities(org.signal.chat.common.DeviceCapability.DEVICE_CAPABILITY_TRANSFER);
+    }
+
+    if (deleteSync) {
+      requestBuilder.addCapabilities(org.signal.chat.common.DeviceCapability.DEVICE_CAPABILITY_DELETE_SYNC);
+    }
+
+    if (versionedExpirationTimer) {
+      requestBuilder.addCapabilities(org.signal.chat.common.DeviceCapability.DEVICE_CAPABILITY_VERSIONED_EXPIRATION_TIMER);
+    }
+
+    final SetCapabilitiesResponse ignored = authenticatedServiceStub().setCapabilities(requestBuilder.build());
+
+    final Set<DeviceCapability> expectedCapabilities = new HashSet<>();
+
+    if (storage) {
+      expectedCapabilities.add(DeviceCapability.STORAGE);
+    }
+
+    if (transfer) {
+      expectedCapabilities.add(DeviceCapability.TRANSFER);
+    }
+
+    if (deleteSync) {
+      expectedCapabilities.add(DeviceCapability.DELETE_SYNC);
+    }
+
+    if (versionedExpirationTimer) {
+      expectedCapabilities.add(DeviceCapability.VERSIONED_EXPIRATION_TIMER);
+    }
 
     verify(device).setCapabilities(expectedCapabilities);
   }

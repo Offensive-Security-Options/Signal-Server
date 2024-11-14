@@ -17,22 +17,22 @@ import io.swagger.v3.oas.annotations.headers.Header;
 import io.swagger.v3.oas.annotations.media.Content;
 import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotNull;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.HeaderParam;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.WebApplicationException;
+import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.core.Context;
+import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Optional;
-import javax.validation.Valid;
-import javax.validation.constraints.NotNull;
-import javax.ws.rs.Consumes;
-import javax.ws.rs.HeaderParam;
-import javax.ws.rs.POST;
-import javax.ws.rs.Path;
-import javax.ws.rs.Produces;
-import javax.ws.rs.WebApplicationException;
-import javax.ws.rs.container.ContainerRequestContext;
-import javax.ws.rs.core.Context;
-import javax.ws.rs.core.MediaType;
-import javax.ws.rs.core.Response;
 import org.whispersystems.textsecuregcm.auth.BasicAuthorizationHeader;
 import org.whispersystems.textsecuregcm.auth.PhoneVerificationTokenManager;
 import org.whispersystems.textsecuregcm.auth.RegistrationLockVerificationManager;
@@ -40,11 +40,11 @@ import org.whispersystems.textsecuregcm.entities.AccountIdentityResponse;
 import org.whispersystems.textsecuregcm.entities.PhoneVerificationRequest;
 import org.whispersystems.textsecuregcm.entities.RegistrationLockFailure;
 import org.whispersystems.textsecuregcm.entities.RegistrationRequest;
-import org.whispersystems.textsecuregcm.limits.RateLimiter;
 import org.whispersystems.textsecuregcm.limits.RateLimiters;
 import org.whispersystems.textsecuregcm.metrics.UserAgentTagUtil;
 import org.whispersystems.textsecuregcm.storage.Account;
 import org.whispersystems.textsecuregcm.storage.AccountsManager;
+import org.whispersystems.textsecuregcm.storage.DeviceCapability;
 import org.whispersystems.textsecuregcm.storage.DeviceSpec;
 import org.whispersystems.textsecuregcm.util.HeaderUtils;
 import org.whispersystems.textsecuregcm.util.Util;
@@ -127,7 +127,7 @@ public class RegistrationController {
       REREGISTRATION_IDLE_DAYS_DISTRIBUTION.record(timeSinceLastSeen.toDays());
     });
 
-    if (!registrationRequest.skipDeviceTransfer() && existingAccount.map(Account::isTransferSupported).orElse(false)) {
+    if (!registrationRequest.skipDeviceTransfer() && existingAccount.map(account -> account.hasCapability(DeviceCapability.TRANSFER)).orElse(false)) {
       // If a device transfer is possible, clients must explicitly opt out of a transfer (i.e. after prompting the user)
       // before we'll let them create a new account "from scratch"
       throw new WebApplicationException(Response.status(409, "device transfer available").build());
@@ -171,7 +171,7 @@ public class RegistrationController {
         account.getPhoneNumberIdentifier(),
         account.getUsernameHash().orElse(null),
         account.getUsernameLinkHandle(),
-        existingAccount.map(Account::isStorageSupported).orElse(false));
+        existingAccount.map(a -> a.hasCapability(DeviceCapability.STORAGE)).orElse(false));
   }
 
 }

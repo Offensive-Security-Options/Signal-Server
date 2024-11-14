@@ -32,6 +32,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import org.apache.commons.lang3.StringUtils;
+import org.eclipse.jetty.util.StaticException;
 import org.reactivestreams.Publisher;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -45,13 +46,12 @@ import org.whispersystems.textsecuregcm.limits.MessageDeliveryLoopMonitor;
 import org.whispersystems.textsecuregcm.metrics.MessageMetrics;
 import org.whispersystems.textsecuregcm.metrics.MetricsUtil;
 import org.whispersystems.textsecuregcm.metrics.UserAgentTagUtil;
-import org.whispersystems.textsecuregcm.push.DisplacedPresenceListener;
+import org.whispersystems.textsecuregcm.push.WebSocketConnectionEventListener;
 import org.whispersystems.textsecuregcm.push.PushNotificationManager;
 import org.whispersystems.textsecuregcm.push.PushNotificationScheduler;
 import org.whispersystems.textsecuregcm.push.ReceiptSender;
 import org.whispersystems.textsecuregcm.storage.ClientReleaseManager;
 import org.whispersystems.textsecuregcm.storage.Device;
-import org.whispersystems.textsecuregcm.storage.MessageAvailabilityListener;
 import org.whispersystems.textsecuregcm.storage.MessagesManager;
 import org.whispersystems.textsecuregcm.util.HeaderUtils;
 import org.whispersystems.websocket.WebSocketClient;
@@ -62,18 +62,15 @@ import reactor.core.observability.micrometer.Micrometer;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Scheduler;
+import javax.annotation.Nullable;
 
-public class WebSocketConnection implements MessageAvailabilityListener, DisplacedPresenceListener {
+public class WebSocketConnection implements WebSocketConnectionEventListener {
 
   private static final DistributionSummary messageTime = Metrics.summary(
       name(MessageController.class, "messageDeliveryDuration"));
   private static final DistributionSummary primaryDeviceMessageTime = Metrics.summary(
       name(MessageController.class, "primaryDeviceMessageDeliveryDuration"));
   private static final Counter sendMessageCounter = Metrics.counter(name(WebSocketConnection.class, "sendMessage"));
-  private static final Counter messageAvailableCounter = Metrics.counter(
-      name(WebSocketConnection.class, "messagesAvailable"));
-  private static final Counter messagesPersistedCounter = Metrics.counter(
-      name(WebSocketConnection.class, "messagesPersisted"));
   private static final Counter bytesSentCounter = Metrics.counter(name(WebSocketConnection.class, "bytesSent"));
   private static final Counter sendFailuresCounter = Metrics.counter(name(WebSocketConnection.class, "sendFailures"));
 
@@ -85,15 +82,18 @@ public class WebSocketConnection implements MessageAvailabilityListener, Displac
   private static final String DISPLACEMENT_COUNTER_NAME = name(WebSocketConnection.class, "displacement");
   private static final String NON_SUCCESS_RESPONSE_COUNTER_NAME = name(WebSocketConnection.class,
       "clientNonSuccessResponse");
-  private static final String CLIENT_CLOSED_MESSAGE_AVAILABLE_COUNTER_NAME = name(WebSocketConnection.class,
-      "messageAvailableAfterClientClosed");
   private static final String SEND_MESSAGES_FLUX_NAME = MetricsUtil.name(WebSocketConnection.class,
       "sendMessages");
   private static final String SEND_MESSAGE_ERROR_COUNTER = MetricsUtil.name(WebSocketConnection.class,
       "sendMessageError");
+  private static final String MESSAGE_AVAILABLE_COUNTER_NAME = name(WebSocketConnection.class, "messagesAvailable");
+  private static final String MESSAGES_PERSISTED_COUNTER_NAME = name(WebSocketConnection.class, "messagesPersisted");
+
+  private static final String PRESENCE_MANAGER_TAG = "presenceManager";
   private static final String STATUS_CODE_TAG = "status";
   private static final String STATUS_MESSAGE_TAG = "message";
   private static final String ERROR_TYPE_TAG = "errorType";
+  private static final String EXCEPTION_TYPE_TAG = "exceptionType";
 
   private static final long SLOW_DRAIN_THRESHOLD = 10_000;
 
@@ -317,70 +317,78 @@ public class WebSocketConnection implements MessageAvailabilityListener, Displac
   void processStoredMessages() {
     if (processStoredMessagesSemaphore.tryAcquire()) {
       final StoredMessageState state = storedMessageState.getAndSet(StoredMessageState.EMPTY);
-      final CompletableFuture<Void> queueCleared = new CompletableFuture<>();
+      final boolean cachedMessagesOnly = state != StoredMessageState.PERSISTED_NEW_MESSAGES_AVAILABLE;
+      sendMessages(cachedMessagesOnly)
+          // Update our state with the outcome, send the empty queue message if we need to, and release the semaphore
+          .whenComplete((ignored, cause) -> {
+            try {
+              if (cause != null) {
+                // We failed, if the state is currently EMPTY, set it to what it was before we tried
+                storedMessageState.compareAndSet(StoredMessageState.EMPTY, state);
+                return;
+              }
 
-      sendMessages(state != StoredMessageState.PERSISTED_NEW_MESSAGES_AVAILABLE, queueCleared);
+              // Cleared the queue! Send a queue empty message if we need to
+              consecutiveRetries.set(0);
+              if (sentInitialQueueEmptyMessage.compareAndSet(false, true)) {
+                final Tags tags = Tags.of(UserAgentTagUtil.getPlatformTag(client.getUserAgent()));
+                final long drainDuration = System.currentTimeMillis() - queueDrainStartTime.get();
 
-      setQueueClearedHandler(state, queueCleared);
+                Metrics.summary(INITIAL_QUEUE_LENGTH_DISTRIBUTION_NAME, tags).record(sentMessageCounter.sum());
+                Metrics.timer(INITIAL_QUEUE_DRAIN_TIMER_NAME, tags).record(drainDuration, TimeUnit.MILLISECONDS);
+
+                if (drainDuration > SLOW_DRAIN_THRESHOLD) {
+                  Metrics.counter(SLOW_QUEUE_DRAIN_COUNTER_NAME, tags).increment();
+                }
+
+                client.sendRequest("PUT", "/api/v1/queue/empty",
+                    Collections.singletonList(HeaderUtils.getTimestampHeader()), Optional.empty());
+              }
+            } finally {
+              processStoredMessagesSemaphore.release();
+            }
+          })
+          // Potentially kick off more work, must happen after we release the semaphore
+          .whenComplete((ignored, cause) -> processMoreIfRequested(cause));
     }
   }
 
-  private void setQueueClearedHandler(final StoredMessageState state, final CompletableFuture<Void> queueCleared) {
-
-    queueCleared.whenComplete((v, cause) -> {
-      if (cause == null) {
-        consecutiveRetries.set(0);
-
-        if (sentInitialQueueEmptyMessage.compareAndSet(false, true)) {
-          final List<Tag> tags = List.of(
-              UserAgentTagUtil.getPlatformTag(client.getUserAgent())
-          );
-          final long drainDuration = System.currentTimeMillis() - queueDrainStartTime.get();
-
-          Metrics.summary(INITIAL_QUEUE_LENGTH_DISTRIBUTION_NAME, tags).record(sentMessageCounter.sum());
-          Metrics.timer(INITIAL_QUEUE_DRAIN_TIMER_NAME, tags).record(drainDuration, TimeUnit.MILLISECONDS);
-
-          if (drainDuration > SLOW_DRAIN_THRESHOLD) {
-            Metrics.counter(SLOW_QUEUE_DRAIN_COUNTER_NAME, tags).increment();
-          }
-
-          client.sendRequest("PUT", "/api/v1/queue/empty",
-              Collections.singletonList(HeaderUtils.getTimestampHeader()), Optional.empty());
-        }
-      } else {
-        storedMessageState.compareAndSet(StoredMessageState.EMPTY, state);
+  /**
+   * After processing messages, kick off another processing job if more messages came in or if there was an error
+   *
+   * @param cause An error that was encountered when processing the message queue, if there was one
+   */
+  private void processMoreIfRequested(final @Nullable Throwable cause) {
+    if (cause == null) {
+      // Success, but check if more messages came in while we were processing
+      if (storedMessageState.get() != StoredMessageState.EMPTY) {
+        processStoredMessages();
       }
+      return;
+    }
 
-      processStoredMessagesSemaphore.release();
+    if (!client.isOpen()) {
+      logger.debug("Client disconnected before queue cleared");
+      return;
+    }
 
-      if (cause == null) {
-        if (storedMessageState.get() != StoredMessageState.EMPTY) {
-          processStoredMessages();
-        }
-      } else {
-        if (client.isOpen()) {
+    if (consecutiveRetries.incrementAndGet() > MAX_CONSECUTIVE_RETRIES) {
+      logger.warn("Max consecutive retries exceeded", cause);
+      client.close(1011, "Failed to retrieve messages");
+      return;
+    }
 
-          if (consecutiveRetries.incrementAndGet() > MAX_CONSECUTIVE_RETRIES) {
-            logger.warn("Max consecutive retries exceeded", cause);
-            client.close(1011, "Failed to retrieve messages");
-          } else {
-            logger.debug("Failed to clear queue", cause);
-            final List<Tag> tags = List.of(UserAgentTagUtil.getPlatformTag(client.getUserAgent()));
+    logger.debug("Failed to clear queue", cause);
+    final Tags tags = Tags.of(UserAgentTagUtil.getPlatformTag(client.getUserAgent()));
 
-            Metrics.counter(QUEUE_DRAIN_RETRY_COUNTER_NAME, tags).increment();
+    Metrics.counter(QUEUE_DRAIN_RETRY_COUNTER_NAME, tags).increment();
 
-            final long delay = RETRY_DELAY_MILLIS + random.nextInt(RETRY_DELAY_JITTER_MILLIS);
-            retryFuture
-                .set(scheduledExecutorService.schedule(this::processStoredMessages, delay, TimeUnit.MILLISECONDS));
-          }
-        } else {
-          logger.debug("Client disconnected before queue cleared");
-        }
-      }
-    });
+    final long delay = RETRY_DELAY_MILLIS + random.nextInt(RETRY_DELAY_JITTER_MILLIS);
+    retryFuture.set(scheduledExecutorService.schedule(this::processStoredMessages, delay, TimeUnit.MILLISECONDS));
   }
 
-  private void sendMessages(final boolean cachedMessagesOnly, final CompletableFuture<Void> queueCleared) {
+  private CompletableFuture<Void> sendMessages(final boolean cachedMessagesOnly) {
+    final CompletableFuture<Void> queueCleared = new CompletableFuture<>();
 
     final Publisher<Envelope> messages =
         messagesManager.getMessagesForDeviceReactive(auth.getAccount().getUuid(), auth.getAuthenticatedDevice(), cachedMessagesOnly);
@@ -426,26 +434,29 @@ public class WebSocketConnection implements MessageAvailabilityListener, Displac
         );
 
     messageSubscription.set(subscription);
+    return queueCleared;
   }
 
-  private void measureSendMessageErrors(Throwable e, final boolean terminal) {
+  private void measureSendMessageErrors(final Throwable e, final boolean terminal) {
     final String errorType;
+
     if (e instanceof TimeoutException) {
       errorType = "timeout";
-    } else if (e instanceof java.nio.channels.ClosedChannelException) {
-      errorType = "closedChannel";
-    } else if (e == WebSocketResourceProvider.CONNECTION_CLOSED_EXCEPTION) {
+    } else if (e instanceof java.nio.channels.ClosedChannelException ||
+        e == WebSocketResourceProvider.CONNECTION_CLOSED_EXCEPTION ||
+        e instanceof org.eclipse.jetty.io.EofException ||
+        (e instanceof StaticException staticException && "Closed".equals(staticException.getMessage()))) {
       errorType = "connectionClosed";
-    } else if (e instanceof org.eclipse.jetty.io.EofException) {
-      errorType = "connectionEof";
     } else {
       logger.warn(terminal ? "Send message failure terminated stream" : "Send message failed", e);
       errorType = "other";
     }
-    final Tags tags = Tags.of(
-        UserAgentTagUtil.getPlatformTag(client.getUserAgent()),
-        Tag.of(ERROR_TYPE_TAG, errorType));
-    Metrics.counter(SEND_MESSAGE_ERROR_COUNTER, tags).increment();
+
+    Metrics.counter(SEND_MESSAGE_ERROR_COUNTER, Tags.of(
+            UserAgentTagUtil.getPlatformTag(client.getUserAgent()),
+            Tag.of(ERROR_TYPE_TAG, errorType),
+            Tag.of(EXCEPTION_TYPE_TAG, e.getClass().getSimpleName())))
+        .increment();
   }
 
   private CompletableFuture<Void> sendMessage(Envelope envelope) {
@@ -461,44 +472,32 @@ public class WebSocketConnection implements MessageAvailabilityListener, Displac
   }
 
   @Override
-  public boolean handleNewMessagesAvailable() {
-    if (!client.isOpen()) {
-      // The client may become closed without successful removal of references to the `MessageAvailabilityListener`
-      Metrics.counter(CLIENT_CLOSED_MESSAGE_AVAILABLE_COUNTER_NAME).increment();
-      return false;
-    }
-
-    messageAvailableCounter.increment();
+  public void handleNewMessageAvailable() {
+    Metrics.counter(MESSAGE_AVAILABLE_COUNTER_NAME,
+            PRESENCE_MANAGER_TAG, "pubsub")
+        .increment();
 
     storedMessageState.compareAndSet(StoredMessageState.EMPTY, StoredMessageState.CACHED_NEW_MESSAGES_AVAILABLE);
 
     processStoredMessages();
-
-    return true;
   }
 
   @Override
-  public boolean handleMessagesPersisted() {
-    if (!client.isOpen()) {
-      // The client may become without successful removal of references to the `MessageAvailabilityListener`
-      Metrics.counter(CLIENT_CLOSED_MESSAGE_AVAILABLE_COUNTER_NAME).increment();
-      return false;
-    }
-    messagesPersistedCounter.increment();
+  public void handleMessagesPersisted() {
+    Metrics.counter(MESSAGES_PERSISTED_COUNTER_NAME,
+            PRESENCE_MANAGER_TAG, "pubsub")
+        .increment();
 
     storedMessageState.set(StoredMessageState.PERSISTED_NEW_MESSAGES_AVAILABLE);
 
     processStoredMessages();
-
-    return true;
   }
 
   @Override
-  public void handleDisplacement(final boolean connectedElsewhere) {
+  public void handleConnectionDisplaced(final boolean connectedElsewhere) {
     final Tags tags = Tags.of(
         UserAgentTagUtil.getPlatformTag(client.getUserAgent()),
-        Tag.of("connectedElsewhere", String.valueOf(connectedElsewhere))
-    );
+        Tag.of("connectedElsewhere", String.valueOf(connectedElsewhere)));
 
     Metrics.counter(DISPLACEMENT_COUNTER_NAME, tags).increment();
 
@@ -513,13 +512,7 @@ public class WebSocketConnection implements MessageAvailabilityListener, Displac
       message = "OK";
     }
 
-    try {
-      client.close(code, message);
-    } catch (final Exception e) {
-      logger.warn("Orderly close failed", e);
-
-      client.hardDisconnectQuietly();
-    }
+    client.close(code, message);
   }
 
   private record StoredMessageInfo(UUID guid, long serverTimestamp) {

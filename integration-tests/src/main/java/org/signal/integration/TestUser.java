@@ -14,10 +14,12 @@ import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import org.signal.libsignal.protocol.IdentityKey;
 import org.signal.libsignal.protocol.IdentityKeyPair;
+import org.signal.libsignal.protocol.InvalidKeyException;
 import org.signal.libsignal.protocol.ecc.ECPublicKey;
 import org.signal.libsignal.protocol.state.SignedPreKeyRecord;
 import org.signal.libsignal.protocol.util.KeyHelper;
@@ -126,7 +128,7 @@ public class TestUser {
   }
 
   public AccountAttributes accountAttributes() {
-    return new AccountAttributes(true, registrationId, pniRegistrationId, "".getBytes(StandardCharsets.UTF_8), "", true, new Device.DeviceCapabilities(false, false, false, false))
+    return new AccountAttributes(true, registrationId, pniRegistrationId, "".getBytes(StandardCharsets.UTF_8), "", true, Set.of())
         .withUnidentifiedAccessKey(unidentifiedAccessKey)
         .withRecoveryPassword(registrationPassword);
   }
@@ -161,15 +163,19 @@ public class TestUser {
         : aciIdentityKey;
     final TestDevice device = requireNonNull(devices.get(deviceId));
     final SignedPreKeyRecord signedPreKeyRecord = device.latestSignedPreKey(identity);
-    return new PreKeySetPublicView(
-        Collections.emptyList(),
-        identity.getPublicKey(),
-        new SignedPreKeyPublicView(
-            signedPreKeyRecord.getId(),
-            signedPreKeyRecord.getKeyPair().getPublicKey(),
-            signedPreKeyRecord.getSignature()
-        )
-    );
+    try {
+      return new PreKeySetPublicView(
+          Collections.emptyList(),
+          identity.getPublicKey(),
+          new SignedPreKeyPublicView(
+              signedPreKeyRecord.getId(),
+              signedPreKeyRecord.getKeyPair().getPublicKey(),
+              signedPreKeyRecord.getSignature()
+          )
+      );
+    } catch (InvalidKeyException e) {
+      throw new RuntimeException(e);
+    }
   }
 
   public record SignedPreKeyPublicView(

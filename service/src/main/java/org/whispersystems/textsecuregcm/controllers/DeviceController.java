@@ -13,52 +13,63 @@ import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.Timer;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.headers.Header;
+import io.swagger.v3.oas.annotations.media.Content;
 import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.DELETE;
+import jakarta.ws.rs.DefaultValue;
+import jakarta.ws.rs.ForbiddenException;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.HeaderParam;
+import jakarta.ws.rs.PUT;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
+import jakarta.ws.rs.WebApplicationException;
+import jakarta.ws.rs.core.Context;
+import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
 import java.time.Duration;
+import java.time.Instant;
+import java.util.Arrays;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 import javax.annotation.Nullable;
-import javax.validation.Valid;
-import javax.validation.constraints.Max;
-import javax.validation.constraints.Min;
-import javax.validation.constraints.NotNull;
-import javax.validation.constraints.Size;
-import javax.ws.rs.Consumes;
-import javax.ws.rs.DELETE;
-import javax.ws.rs.DefaultValue;
-import javax.ws.rs.ForbiddenException;
-import javax.ws.rs.GET;
-import javax.ws.rs.HeaderParam;
-import javax.ws.rs.PUT;
-import javax.ws.rs.Path;
-import javax.ws.rs.PathParam;
-import javax.ws.rs.Produces;
-import javax.ws.rs.QueryParam;
-import javax.ws.rs.WebApplicationException;
-import javax.ws.rs.core.Context;
-import javax.ws.rs.core.MediaType;
-import javax.ws.rs.core.Response;
-import io.swagger.v3.oas.annotations.tags.Tag;
 import org.glassfish.jersey.server.ContainerRequest;
-import org.whispersystems.textsecuregcm.auth.LinkedDeviceRefreshRequirementProvider;
 import org.whispersystems.textsecuregcm.auth.AuthenticatedDevice;
 import org.whispersystems.textsecuregcm.auth.BasicAuthorizationHeader;
 import org.whispersystems.textsecuregcm.auth.ChangesLinkedDevices;
+import org.whispersystems.textsecuregcm.auth.LinkedDeviceRefreshRequirementProvider;
 import org.whispersystems.textsecuregcm.entities.AccountAttributes;
 import org.whispersystems.textsecuregcm.entities.DeviceActivationRequest;
 import org.whispersystems.textsecuregcm.entities.DeviceInfo;
 import org.whispersystems.textsecuregcm.entities.DeviceInfoList;
-import org.whispersystems.textsecuregcm.entities.DeviceResponse;
 import org.whispersystems.textsecuregcm.entities.LinkDeviceRequest;
+import org.whispersystems.textsecuregcm.entities.LinkDeviceResponse;
 import org.whispersystems.textsecuregcm.entities.PreKeySignatureValidator;
 import org.whispersystems.textsecuregcm.entities.ProvisioningMessage;
+import org.whispersystems.textsecuregcm.entities.RemoteAttachment;
+import org.whispersystems.textsecuregcm.entities.RestoreAccountRequest;
 import org.whispersystems.textsecuregcm.entities.SetPublicKeyRequest;
+import org.whispersystems.textsecuregcm.entities.TransferArchiveUploadedRequest;
 import org.whispersystems.textsecuregcm.identity.IdentityType;
+import org.whispersystems.textsecuregcm.limits.RateLimitedByIp;
 import org.whispersystems.textsecuregcm.limits.RateLimiters;
 import org.whispersystems.textsecuregcm.metrics.MetricsUtil;
 import org.whispersystems.textsecuregcm.metrics.UserAgentTagUtil;
@@ -66,9 +77,10 @@ import org.whispersystems.textsecuregcm.storage.Account;
 import org.whispersystems.textsecuregcm.storage.AccountsManager;
 import org.whispersystems.textsecuregcm.storage.ClientPublicKeysManager;
 import org.whispersystems.textsecuregcm.storage.Device;
-import org.whispersystems.textsecuregcm.storage.Device.DeviceCapabilities;
+import org.whispersystems.textsecuregcm.storage.DeviceCapability;
 import org.whispersystems.textsecuregcm.storage.DeviceSpec;
 import org.whispersystems.textsecuregcm.storage.LinkDeviceTokenAlreadyUsedException;
+import org.whispersystems.textsecuregcm.util.DeviceCapabilityAdapter;
 import org.whispersystems.textsecuregcm.util.EnumMapUtil;
 import org.whispersystems.textsecuregcm.util.ExceptionUtils;
 import org.whispersystems.textsecuregcm.util.LinkDeviceToken;
@@ -222,7 +234,7 @@ public class DeviceController {
   @ApiResponse(responseCode = "429", description = "Too many attempts", headers = @Header(
       name = "Retry-After",
       description = "If present, an positive integer indicating the number of seconds before a subsequent attempt could succeed"))
-  public DeviceResponse linkDevice(@HeaderParam(HttpHeaders.AUTHORIZATION) BasicAuthorizationHeader authorizationHeader,
+  public LinkDeviceResponse linkDevice(@HeaderParam(HttpHeaders.AUTHORIZATION) BasicAuthorizationHeader authorizationHeader,
       @HeaderParam(HttpHeaders.USER_AGENT) @Nullable String userAgent,
       @NotNull @Valid LinkDeviceRequest linkDeviceRequest,
       @Context ContainerRequest containerRequest)
@@ -262,7 +274,7 @@ public class DeviceController {
       throw new DeviceLimitExceededException(account.getDevices().size(), maxDeviceLimit);
     }
 
-    final DeviceCapabilities capabilities = accountAttributes.getCapabilities();
+    final Set<DeviceCapability> capabilities = accountAttributes.getCapabilities();
 
     if (capabilities == null) {
       throw new WebApplicationException(Response.status(422, "Missing device capabilities").build());
@@ -295,7 +307,7 @@ public class DeviceController {
                   deviceActivationRequest.aciPqLastResortPreKey(),
                   deviceActivationRequest.pniPqLastResortPreKey()),
               linkDeviceRequest.verificationCode())
-          .thenApply(accountAndDevice -> new DeviceResponse(
+          .thenApply(accountAndDevice -> new LinkDeviceResponse(
               accountAndDevice.first().getIdentifier(IdentityType.ACI),
               accountAndDevice.first().getIdentifier(IdentityType.PNI),
               accountAndDevice.second().getId()))
@@ -317,11 +329,11 @@ public class DeviceController {
           Waits for a new device to be linked to an account and returns basic information about the new device when
           available.
           """)
-  @ApiResponse(responseCode = "200", description = "The specified was linked to an account")
-  @ApiResponse(responseCode = "204", description = "No device was linked to the account before the call completed")
+  @ApiResponse(responseCode = "200", description = "A device was linked to an account using the token associated with the given token identifier",
+      content = @Content(schema = @Schema(implementation = DeviceInfo.class)))
+  @ApiResponse(responseCode = "204", description = "No device was linked to the account before the call completed; clients may repeat the call to continue waiting")
   @ApiResponse(responseCode = "400", description = "The given token identifier or timeout was invalid")
   @ApiResponse(responseCode = "429", description = "Rate-limited; try again after the prescribed delay")
-  @Schema(description = "Basic information about the linked device", implementation = DeviceInfo.class)
   public CompletableFuture<Response> waitForLinkedDevice(
       @ReadOnly @Auth final AuthenticatedDevice authenticatedDevice,
 
@@ -350,9 +362,9 @@ public class DeviceController {
     linkedDeviceListenerCounter.incrementAndGet();
 
     final Timer.Sample sample = Timer.start();
-
     try {
-      return accounts.waitForNewLinkedDevice(tokenIdentifier, Duration.ofSeconds(timeoutSeconds))
+      return accounts.waitForNewLinkedDevice(authenticatedDevice.getAccount().getUuid(),
+              authenticatedDevice.getAuthenticatedDevice(), tokenIdentifier, Duration.ofSeconds(timeoutSeconds))
           .thenApply(maybeDeviceInfo -> maybeDeviceInfo
               .map(deviceInfo -> Response.status(Response.Status.OK).entity(deviceInfo).build())
               .orElseGet(() -> Response.status(Response.Status.NO_CONTENT).build()))
@@ -397,10 +409,15 @@ public class DeviceController {
   @PUT
   @Produces(MediaType.APPLICATION_JSON)
   @Path("/capabilities")
-  public void setCapabilities(@Mutable @Auth AuthenticatedDevice auth, @NotNull @Valid DeviceCapabilities capabilities) {
+  public void setCapabilities(@Mutable @Auth final AuthenticatedDevice auth,
+
+      @NotNull
+      final Map<String, Boolean> capabilities) {
+
     assert (auth.getAuthenticatedDevice() != null);
     final byte deviceId = auth.getAuthenticatedDevice().getId();
-    accounts.updateDevice(auth.getAccount(), deviceId, d -> d.setCapabilities(capabilities));
+    accounts.updateDevice(auth.getAccount(), deviceId,
+        d -> d.setCapabilities(DeviceCapabilityAdapter.mapToSet(capabilities)));
   }
 
   @PUT
@@ -425,10 +442,138 @@ public class DeviceController {
         setPublicKeyRequest.publicKey());
   }
 
-  private static boolean isCapabilityDowngrade(Account account, DeviceCapabilities capabilities) {
-    boolean isDowngrade = false;
-    isDowngrade |= account.isDeleteSyncSupported() && !capabilities.deleteSync();
-    isDowngrade |= account.isVersionedExpirationTimerSupported() && !capabilities.versionedExpirationTimer();
-    return isDowngrade;
+  private static boolean isCapabilityDowngrade(final Account account, final Set<DeviceCapability> capabilities) {
+    final Set<DeviceCapability> requiredCapabilities = Arrays.stream(DeviceCapability.values())
+        .filter(DeviceCapability::preventDowngrade)
+        .filter(account::hasCapability)
+        .collect(Collectors.toSet());
+
+    return !capabilities.containsAll(requiredCapabilities);
+  }
+
+  @PUT
+  @Consumes(MediaType.APPLICATION_JSON)
+  @Produces(MediaType.APPLICATION_JSON)
+  @Path("/restore_account/{token}")
+  @Operation(
+      summary = "Signals that a new device is requesting restoration of account data by some method",
+      description = """
+          Signals that a new device is requesting restoration of account data by some method. Devices waiting via the
+          "wait for 'restore account' request" endpoint will be notified that the request has been issued.
+          """)
+  @ApiResponse(responseCode = "204", description = "Success")
+  @ApiResponse(responseCode = "422", description = "The request object could not be parsed or was otherwise invalid")
+  @ApiResponse(responseCode = "429", description = "Rate-limited; try again after the prescribed delay")
+  @RateLimitedByIp(RateLimiters.For.RECORD_DEVICE_TRANSFER_REQUEST)
+  public CompletionStage<Void> recordRestoreAccountRequest(
+      @PathParam("token")
+      @NotBlank
+      @Size(max = 64)
+      @Schema(description = "A randomly-generated token identifying the request for device-to-device transfer.",
+          requiredMode = Schema.RequiredMode.REQUIRED,
+          maximum = "64") final String token,
+
+      @Valid
+      final RestoreAccountRequest restoreAccountRequest) {
+
+    return accounts.recordRestoreAccountRequest(token, restoreAccountRequest);
+  }
+
+  @GET
+  @Produces(MediaType.APPLICATION_JSON)
+  @Path("/restore_account/{token}")
+  @Operation(summary = "Wait for 'restore account' request")
+  @ApiResponse(responseCode = "200", description = "A 'restore account' request was received for the given token",
+      content = @Content(schema = @Schema(implementation = RestoreAccountRequest.class)))
+  @ApiResponse(responseCode = "204", description = "No 'restore account' request for the given token was received before the call completed; clients may repeat the call to continue waiting")
+  @ApiResponse(responseCode = "400", description = "The given token or timeout was invalid")
+  @ApiResponse(responseCode = "429", description = "Rate-limited; try again after the prescribed delay")
+  @RateLimitedByIp(RateLimiters.For.WAIT_FOR_DEVICE_TRANSFER_REQUEST)
+  public CompletionStage<Response> waitForDeviceTransferRequest(
+      @PathParam("token")
+      @NotBlank
+      @Size(max = 64)
+      @Schema(description = "A randomly-generated token identifying the request for device-to-device transfer.",
+          requiredMode = Schema.RequiredMode.REQUIRED,
+          maximum = "64") final String token,
+
+      @QueryParam("timeout")
+      @DefaultValue("30")
+      @Min(1)
+      @Max(3600)
+      @Schema(requiredMode = Schema.RequiredMode.NOT_REQUIRED,
+          minimum = "1",
+          maximum = "3600",
+          description = """
+                The amount of time (in seconds) to wait for a response. If a transfer archive for the authenticated
+                device is not available within the given amount of time, this endpoint will return a status of HTTP/204.
+              """) final int timeoutSeconds) {
+
+    return accounts.waitForRestoreAccountRequest(token, Duration.ofSeconds(timeoutSeconds))
+        .thenApply(maybeRequestReceived -> maybeRequestReceived
+            .map(restoreAccountRequest -> Response.status(Response.Status.OK).entity(restoreAccountRequest).build())
+            .orElseGet(() -> Response.status(Response.Status.NO_CONTENT).build()));
+  }
+
+  @PUT
+  @Consumes(MediaType.APPLICATION_JSON)
+  @Produces(MediaType.APPLICATION_JSON)
+  @Path("/transfer_archive")
+  @Operation(
+      summary = "Signals that a transfer archive has been uploaded for a specific linked device",
+      description = """
+          Signals that a transfer archive has been uploaded for a specific linked device. Devices waiting via the "wait
+          for transfer archive" endpoint will be notified that the new archive is available.
+          """)
+  @ApiResponse(responseCode = "204", description = "Success")
+  @ApiResponse(responseCode = "422", description = "The request object could not be parsed or was otherwise invalid")
+  @ApiResponse(responseCode = "429", description = "Rate-limited; try again after the prescribed delay")
+  public CompletionStage<Void> recordTransferArchiveUploaded(@ReadOnly @Auth final AuthenticatedDevice authenticatedDevice,
+      @NotNull @Valid final TransferArchiveUploadedRequest transferArchiveUploadedRequest) {
+
+    return rateLimiters.getUploadTransferArchiveLimiter().validateAsync(authenticatedDevice.getAccount().getIdentifier(IdentityType.ACI))
+        .thenCompose(ignored -> accounts.recordTransferArchiveUpload(authenticatedDevice.getAccount(),
+            transferArchiveUploadedRequest.destinationDeviceId(),
+            Instant.ofEpochMilli(transferArchiveUploadedRequest.destinationDeviceCreated()),
+            transferArchiveUploadedRequest.transferArchive()));
+  }
+
+  @GET
+  @Produces(MediaType.APPLICATION_JSON)
+  @Path("/transfer_archive")
+  @Operation(summary = "Wait for a new transfer archive to be uploaded",
+      description = """
+          Waits for a new transfer archive to be uploaded for the authenticated device and returns the location of the
+          archive when available.
+          """)
+  @ApiResponse(responseCode = "200", description = "A new transfer archive was uploaded for the authenticated device",
+      content = @Content(schema = @Schema(implementation = RemoteAttachment.class)))
+  @ApiResponse(responseCode = "204", description = "No transfer archive was uploaded before the call completed; clients may repeat the call to continue waiting")
+  @ApiResponse(responseCode = "400", description = "The given timeout was invalid")
+  @ApiResponse(responseCode = "429", description = "Rate-limited; try again after the prescribed delay")
+  public CompletionStage<Response> waitForTransferArchive(@ReadOnly @Auth final AuthenticatedDevice authenticatedDevice,
+
+      @QueryParam("timeout")
+      @DefaultValue("30")
+      @Min(1)
+      @Max(3600)
+      @Schema(requiredMode = Schema.RequiredMode.NOT_REQUIRED,
+          minimum = "1",
+          maximum = "3600",
+          description = """
+                The amount of time (in seconds) to wait for a response. If a transfer archive for the authenticated
+                device is not available within the given amount of time, this endpoint will return a status of HTTP/204.
+              """) final int timeoutSeconds) {
+
+    final String rateLimiterKey = authenticatedDevice.getAccount().getIdentifier(IdentityType.ACI) +
+        ":" + authenticatedDevice.getAuthenticatedDevice().getId();
+
+    return rateLimiters.getWaitForTransferArchiveLimiter().validateAsync(rateLimiterKey)
+        .thenCompose(ignored -> accounts.waitForTransferArchive(authenticatedDevice.getAccount(),
+            authenticatedDevice.getAuthenticatedDevice(),
+            Duration.ofSeconds(timeoutSeconds)))
+        .thenApply(maybeTransferArchive -> maybeTransferArchive
+            .map(transferArchive -> Response.status(Response.Status.OK).entity(transferArchive).build())
+            .orElseGet(() -> Response.status(Response.Status.NO_CONTENT).build()));
   }
 }

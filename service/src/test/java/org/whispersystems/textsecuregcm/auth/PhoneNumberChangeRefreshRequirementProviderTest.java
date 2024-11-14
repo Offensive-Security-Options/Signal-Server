@@ -24,17 +24,18 @@ import io.dropwizard.core.Configuration;
 import io.dropwizard.core.setup.Environment;
 import io.dropwizard.testing.junit5.DropwizardAppExtension;
 import io.dropwizard.testing.junit5.DropwizardExtensionsSupport;
+import jakarta.servlet.DispatcherType;
+import jakarta.servlet.ServletRegistration;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.client.Invocation;
 import java.io.IOException;
 import java.net.URI;
 import java.util.Collections;
 import java.util.EnumSet;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
-import javax.servlet.DispatcherType;
-import javax.servlet.ServletRegistration;
-import javax.ws.rs.GET;
-import javax.ws.rs.Path;
-import javax.ws.rs.client.Invocation;
 import org.eclipse.jetty.websocket.client.ClientUpgradeRequest;
 import org.eclipse.jetty.websocket.client.WebSocketClient;
 import org.eclipse.jetty.websocket.server.config.JettyWebSocketServletContainerInitializer;
@@ -46,7 +47,6 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.whispersystems.textsecuregcm.filters.RemoteAddressFilter;
-import org.whispersystems.textsecuregcm.push.ClientPresenceManager;
 import org.whispersystems.textsecuregcm.storage.Account;
 import org.whispersystems.textsecuregcm.storage.AccountsManager;
 import org.whispersystems.textsecuregcm.storage.Device;
@@ -73,7 +73,8 @@ class PhoneNumberChangeRefreshRequirementProviderTest {
 
   private static final AccountAuthenticator AUTHENTICATOR = mock(AccountAuthenticator.class);
   private static final AccountsManager ACCOUNTS_MANAGER = mock(AccountsManager.class);
-  private static final ClientPresenceManager CLIENT_PRESENCE = mock(ClientPresenceManager.class);
+  private static final DisconnectionRequestManager DISCONNECTION_REQUEST_MANAGER =
+      mock(DisconnectionRequestManager.class);
 
   private WebSocketClient client;
   private final Account account1 = new Account();
@@ -83,7 +84,7 @@ class PhoneNumberChangeRefreshRequirementProviderTest {
 
   @BeforeEach
   void setUp() throws Exception {
-    reset(AUTHENTICATOR, CLIENT_PRESENCE, ACCOUNTS_MANAGER);
+    reset(AUTHENTICATOR, ACCOUNTS_MANAGER, DISCONNECTION_REQUEST_MANAGER);
     client = new WebSocketClient();
     client.start();
 
@@ -122,9 +123,9 @@ class PhoneNumberChangeRefreshRequirementProviderTest {
           .addMappingForUrlPatterns(EnumSet.of(DispatcherType.REQUEST), false, "/*");
       webSocketEnvironment.jersey().register(new RemoteAddressFilter());
       webSocketEnvironment.jersey()
-          .register(new WebsocketRefreshApplicationEventListener(ACCOUNTS_MANAGER, CLIENT_PRESENCE));
+          .register(new WebsocketRefreshApplicationEventListener(ACCOUNTS_MANAGER, DISCONNECTION_REQUEST_MANAGER));
       environment.jersey()
-          .register(new WebsocketRefreshApplicationEventListener(ACCOUNTS_MANAGER, CLIENT_PRESENCE));
+          .register(new WebsocketRefreshApplicationEventListener(ACCOUNTS_MANAGER, DISCONNECTION_REQUEST_MANAGER));
       webSocketEnvironment.setConnectListener(webSocketSessionContext -> {
       });
 
@@ -198,7 +199,6 @@ class PhoneNumberChangeRefreshRequirementProviderTest {
 
     // Event listeners can fire after responses are sent
     verify(ACCOUNTS_MANAGER, timeout(5000).times(1)).getByAccountIdentifier(eq(account1.getUuid()));
-    verifyNoMoreInteractions(CLIENT_PRESENCE);
     verifyNoMoreInteractions(ACCOUNTS_MANAGER);
   }
 
@@ -212,9 +212,9 @@ class PhoneNumberChangeRefreshRequirementProviderTest {
 
     // Make sure we disconnect the account if the account has changed numbers. Event listeners can fire after responses
     // are sent, so use a timeout.
-    verify(CLIENT_PRESENCE, timeout(5000))
-        .disconnectPresence(eq(account1.getUuid()), eq(authenticatedDevice.getId()));
-    verifyNoMoreInteractions(CLIENT_PRESENCE);
+    verify(DISCONNECTION_REQUEST_MANAGER, timeout(5000))
+        .requestDisconnection(account1.getUuid(), List.of(authenticatedDevice.getId()));
+    verifyNoMoreInteractions(DISCONNECTION_REQUEST_MANAGER);
   }
 
   @Test
@@ -228,9 +228,9 @@ class PhoneNumberChangeRefreshRequirementProviderTest {
 
     // Make sure we disconnect the account if the account has changed numbers. Event listeners can fire after responses
     // are sent, so use a timeout.
-    verify(CLIENT_PRESENCE, timeout(5000))
-        .disconnectPresence(eq(account1.getUuid()), eq(authenticatedDevice.getId()));
-    verifyNoMoreInteractions(CLIENT_PRESENCE);
+    verify(DISCONNECTION_REQUEST_MANAGER, timeout(5000))
+        .requestDisconnection(account1.getUuid(), List.of(authenticatedDevice.getId()));
+    verifyNoMoreInteractions(DISCONNECTION_REQUEST_MANAGER);
   }
 
   @ParameterizedTest
@@ -244,7 +244,6 @@ class PhoneNumberChangeRefreshRequirementProviderTest {
 
     // Shouldn't even read the account if the method has not been annotated
     verifyNoMoreInteractions(ACCOUNTS_MANAGER);
-    verifyNoMoreInteractions(CLIENT_PRESENCE);
   }
 
   @ParameterizedTest
@@ -258,7 +257,6 @@ class PhoneNumberChangeRefreshRequirementProviderTest {
 
     // Shouldn't even read the account if the method has not been annotated
     verifyNoMoreInteractions(ACCOUNTS_MANAGER);
-    verifyNoMoreInteractions(CLIENT_PRESENCE);
   }
 
 

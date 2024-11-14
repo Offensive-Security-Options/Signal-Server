@@ -5,9 +5,9 @@
 
 package org.whispersystems.textsecuregcm.configuration.dynamic;
 
-public record DynamicMessagesConfiguration(boolean storeSharedMrmData, boolean mrmViewExperimentEnabled) {
+public record DynamicMessagesConfiguration(boolean useSharedMrmData) {
 
   public DynamicMessagesConfiguration() {
-    this(false, false);
+    this(false);
   }
 }

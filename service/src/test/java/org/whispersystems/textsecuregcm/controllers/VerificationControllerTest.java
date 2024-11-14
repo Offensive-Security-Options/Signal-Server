@@ -27,6 +27,9 @@ import io.dropwizard.testing.junit5.DropwizardExtensionsSupport;
 import io.dropwizard.testing.junit5.ResourceExtension;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
+import jakarta.ws.rs.client.Entity;
+import jakarta.ws.rs.client.Invocation;
+import jakarta.ws.rs.core.Response;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
@@ -39,9 +42,6 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.stream.Stream;
-import javax.ws.rs.client.Entity;
-import javax.ws.rs.client.Invocation;
-import javax.ws.rs.core.Response;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.http.HttpStatus;
 import org.glassfish.jersey.server.ServerProperties;
@@ -465,7 +465,7 @@ class VerificationControllerTest {
                 Collections.emptyList(), null, null, false, clock.millis(), clock.millis(),
                 registrationServiceSession.expiration()))));
 
-    when(registrationCaptchaManager.assessCaptcha(any(), any(), any()))
+    when(registrationCaptchaManager.assessCaptcha(any(), any(), any(), any()))
         .thenReturn(Optional.of(AssessmentResult.invalid()));
 
     when(verificationSessionManager.update(any(), any()))
@@ -637,7 +637,7 @@ class VerificationControllerTest {
                 Collections.emptyList(), null, null, false, clock.millis(), clock.millis(),
                 registrationServiceSession.expiration()))));
 
-    when(registrationCaptchaManager.assessCaptcha(any(), any(), any()))
+    when(registrationCaptchaManager.assessCaptcha(any(), any(), any(), any()))
         .thenReturn(Optional.of(AssessmentResult.alwaysValid()));
 
     when(verificationSessionManager.update(any(), any()))
@@ -685,7 +685,7 @@ class VerificationControllerTest {
                 Collections.emptyList(), null, null, false, clock.millis(), clock.millis(),
                 registrationServiceSession.expiration()))));
 
-    when(registrationCaptchaManager.assessCaptcha(any(), any(), any()))
+    when(registrationCaptchaManager.assessCaptcha(any(), any(), any(), any()))
         .thenReturn(Optional.of(AssessmentResult.alwaysValid()));
 
     when(verificationSessionManager.update(any(), any()))
@@ -732,7 +732,7 @@ class VerificationControllerTest {
                 Collections.emptyList(), null, null, false, clock.millis(), clock.millis(),
                 registrationServiceSession.expiration()))));
 
-    when(registrationCaptchaManager.assessCaptcha(any(), any(), any()))
+    when(registrationCaptchaManager.assessCaptcha(any(), any(), any(), any()))
         .thenThrow(new IOException("expected service error"));
 
     when(verificationSessionManager.update(any(), any()))

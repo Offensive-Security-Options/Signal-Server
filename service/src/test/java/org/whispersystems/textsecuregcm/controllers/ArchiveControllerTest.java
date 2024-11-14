@@ -10,12 +10,18 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.reset;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import io.dropwizard.auth.AuthValueFactoryProvider;
 import io.dropwizard.testing.junit5.DropwizardExtensionsSupport;
 import io.dropwizard.testing.junit5.ResourceExtension;
 import io.grpc.Status;
+import jakarta.ws.rs.client.Entity;
+import jakarta.ws.rs.client.Invocation;
+import jakarta.ws.rs.client.WebTarget;
+import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
@@ -30,11 +36,6 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
-import javax.ws.rs.client.Entity;
-import javax.ws.rs.client.Invocation;
-import javax.ws.rs.client.WebTarget;
-import javax.ws.rs.core.MediaType;
-import javax.ws.rs.core.Response;
 import org.glassfish.jersey.server.ServerProperties;
 import org.glassfish.jersey.test.grizzly.GrizzlyWebTestContainerFactory;
 import org.junit.jupiter.api.BeforeEach;
@@ -51,6 +52,7 @@ import org.signal.libsignal.zkgroup.InvalidInputException;
 import org.signal.libsignal.zkgroup.ServerSecretParams;
 import org.signal.libsignal.zkgroup.VerificationFailedException;
 import org.signal.libsignal.zkgroup.backups.BackupAuthCredentialPresentation;
+import org.signal.libsignal.zkgroup.backups.BackupCredentialType;
 import org.signal.libsignal.zkgroup.backups.BackupLevel;
 import org.signal.libsignal.zkgroup.receipts.ClientZkReceiptOperations;
 import org.signal.libsignal.zkgroup.receipts.ReceiptCredential;
@@ -59,17 +61,19 @@ import org.signal.libsignal.zkgroup.receipts.ReceiptCredentialRequestContext;
 import org.signal.libsignal.zkgroup.receipts.ReceiptCredentialResponse;
 import org.signal.libsignal.zkgroup.receipts.ReceiptSerial;
 import org.signal.libsignal.zkgroup.receipts.ServerZkReceiptOperations;
-import org.whispersystems.textsecuregcm.auth.AuthenticatedDevice;
 import org.whispersystems.textsecuregcm.auth.AuthenticatedBackupUser;
+import org.whispersystems.textsecuregcm.auth.AuthenticatedDevice;
 import org.whispersystems.textsecuregcm.backup.BackupAuthManager;
 import org.whispersystems.textsecuregcm.backup.BackupAuthTestUtil;
 import org.whispersystems.textsecuregcm.backup.BackupManager;
 import org.whispersystems.textsecuregcm.backup.BackupUploadDescriptor;
 import org.whispersystems.textsecuregcm.backup.CopyResult;
+import org.whispersystems.textsecuregcm.entities.RemoteAttachment;
 import org.whispersystems.textsecuregcm.mappers.CompletionExceptionMapper;
 import org.whispersystems.textsecuregcm.mappers.GrpcStatusRuntimeExceptionMapper;
 import org.whispersystems.textsecuregcm.mappers.RateLimitExceededExceptionMapper;
 import org.whispersystems.textsecuregcm.tests.util.AuthHelper;
+import org.whispersystems.textsecuregcm.util.EnumMapUtil;
 import org.whispersystems.textsecuregcm.util.SystemMapper;
 import org.whispersystems.textsecuregcm.util.TestRandomUtil;
 import reactor.core.publisher.Flux;
@@ -94,7 +98,8 @@ public class ArchiveControllerTest {
       .build();
 
   private final UUID aci = UUID.randomUUID();
-  private final byte[] backupKey = TestRandomUtil.nextBytes(32);
+  private final byte[] messagesBackupKey = TestRandomUtil.nextBytes(32);
+  private final byte[] mediaBackupKey = TestRandomUtil.nextBytes(32);
 
   @BeforeEach
   public void setUp() {
@@ -131,7 +136,7 @@ public class ArchiveControllerTest {
   public void anonymousAuthOnly(final String method, final String path, final String body)
       throws VerificationFailedException {
     final BackupAuthCredentialPresentation presentation = backupAuthTestUtil.getPresentation(
-        BackupLevel.MEDIA, backupKey, aci);
+        BackupLevel.PAID, messagesBackupKey, aci);
     final Invocation.Builder request = resources.getJerseyTest()
         .target(path)
         .request()
@@ -151,15 +156,22 @@ public class ArchiveControllerTest {
 
   @Test
   public void setBackupId() throws RateLimitExceededException {
-    when(backupAuthManager.commitBackupId(any(), any())).thenReturn(CompletableFuture.completedFuture(null));
+    when(backupAuthManager.commitBackupId(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(null));
 
     final Response response = resources.getJerseyTest()
         .target("v1/archives/backupid")
         .request()
         .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.VALID_PASSWORD))
-        .put(Entity.entity(new ArchiveController.SetBackupIdRequest(backupAuthTestUtil.getRequest(backupKey, aci)),
+        .put(Entity.entity(new ArchiveController.SetBackupIdRequest(
+                backupAuthTestUtil.getRequest(messagesBackupKey, aci),
+                backupAuthTestUtil.getRequest(mediaBackupKey, aci)),
             MediaType.APPLICATION_JSON_TYPE));
+
     assertThat(response.getStatus()).isEqualTo(204);
+
+    verify(backupAuthManager).commitBackupId(AuthHelper.VALID_ACCOUNT,
+        backupAuthTestUtil.getRequest(messagesBackupKey, aci),
+        backupAuthTestUtil.getRequest(mediaBackupKey, aci));
   }
 
   @Test
@@ -190,7 +202,7 @@ public class ArchiveControllerTest {
     when(backupManager.setPublicKey(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(null));
 
     final BackupAuthCredentialPresentation presentation = backupAuthTestUtil.getPresentation(
-        BackupLevel.MEDIA, backupKey, aci);
+        BackupLevel.PAID, messagesBackupKey, aci);
     final Response response = resources.getJerseyTest()
         .target("v1/archives/keys")
         .request()
@@ -207,7 +219,7 @@ public class ArchiveControllerTest {
     when(backupManager.setPublicKey(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(null));
 
     final BackupAuthCredentialPresentation presentation = backupAuthTestUtil.getPresentation(
-        BackupLevel.MEDIA, backupKey, aci);
+        BackupLevel.PAID, messagesBackupKey, aci);
     final Response response = resources.getJerseyTest()
         .target("v1/archives/keys")
         .request()
@@ -222,7 +234,7 @@ public class ArchiveControllerTest {
     when(backupManager.setPublicKey(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(null));
 
     final BackupAuthCredentialPresentation presentation = backupAuthTestUtil.getPresentation(
-        BackupLevel.MEDIA, backupKey, aci);
+        BackupLevel.PAID, messagesBackupKey, aci);
     final Response response = resources.getJerseyTest()
         .target("v1/archives/keys")
         .request()
@@ -238,8 +250,8 @@ public class ArchiveControllerTest {
   @ParameterizedTest
   @CsvSource(textBlock = """
       {}, 422
-      '{"backupAuthCredentialRequest": "aaa"}', 400
-      '{"backupAuthCredentialRequest": ""}', 400
+      '{"messagesBackupAuthCredentialRequest": "aaa", "mediaBackupAuthCredentialRequest": "aaa"}', 400
+      '{"messagesBackupAuthCredentialRequest": "", "mediaBackupAuthCredentialRequest": ""}', 400
       """)
   public void setBackupIdInvalid(final String requestBody, final int expectedStatus) {
     final Response response = resources.getJerseyTest()
@@ -260,18 +272,19 @@ public class ArchiveControllerTest {
 
   @ParameterizedTest
   @MethodSource
-  public void setBackupIdException(final Exception ex, final boolean sync, final int expectedStatus)
-      throws RateLimitExceededException {
+  public void setBackupIdException(final Exception ex, final boolean sync, final int expectedStatus) {
     if (sync) {
-      when(backupAuthManager.commitBackupId(any(), any())).thenThrow(ex);
+      when(backupAuthManager.commitBackupId(any(), any(), any())).thenThrow(ex);
     } else {
-      when(backupAuthManager.commitBackupId(any(), any())).thenReturn(CompletableFuture.failedFuture(ex));
+      when(backupAuthManager.commitBackupId(any(), any(), any())).thenReturn(CompletableFuture.failedFuture(ex));
     }
     final Response response = resources.getJerseyTest()
         .target("v1/archives/backupid")
         .request()
         .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.VALID_PASSWORD))
-        .put(Entity.entity(new ArchiveController.SetBackupIdRequest(backupAuthTestUtil.getRequest(backupKey, aci)),
+        .put(Entity.entity(new ArchiveController.SetBackupIdRequest(
+                backupAuthTestUtil.getRequest(messagesBackupKey, aci),
+                backupAuthTestUtil.getRequest(mediaBackupKey, aci)),
             MediaType.APPLICATION_JSON_TYPE));
     assertThat(response.getStatus()).isEqualTo(expectedStatus);
   }
@@ -280,18 +293,38 @@ public class ArchiveControllerTest {
   public void getCredentials() {
     final Instant start = Instant.now().truncatedTo(ChronoUnit.DAYS);
     final Instant end = start.plus(Duration.ofDays(1));
-    final List<BackupAuthManager.Credential> expectedResponse = backupAuthTestUtil.getCredentials(
-        BackupLevel.MEDIA, backupAuthTestUtil.getRequest(backupKey, aci), start, end);
-    when(backupAuthManager.getBackupAuthCredentials(any(), eq(start), eq(end))).thenReturn(
-        CompletableFuture.completedFuture(expectedResponse));
-    final ArchiveController.BackupAuthCredentialsResponse creds = resources.getJerseyTest()
+
+    final Map<BackupCredentialType, List<BackupAuthManager.Credential>> expectedCredentialsByType =
+        EnumMapUtil.toEnumMap(BackupCredentialType.class, credentialType -> backupAuthTestUtil.getCredentials(
+            BackupLevel.PAID, backupAuthTestUtil.getRequest(messagesBackupKey, aci), credentialType, start, end));
+
+    expectedCredentialsByType.forEach((credentialType, expectedCredentials) ->
+        when(backupAuthManager.getBackupAuthCredentials(any(), eq(credentialType), eq(start), eq(end))).thenReturn(
+        CompletableFuture.completedFuture(expectedCredentials)));
+
+    final ArchiveController.BackupAuthCredentialsResponse credentialResponse = resources.getJerseyTest()
         .target("v1/archives/auth")
         .queryParam("redemptionStartSeconds", start.getEpochSecond())
         .queryParam("redemptionEndSeconds", end.getEpochSecond())
         .request()
         .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.VALID_PASSWORD))
         .get(ArchiveController.BackupAuthCredentialsResponse.class);
-    assertThat(creds.credentials().getFirst().redemptionTime()).isEqualTo(start.getEpochSecond());
+
+    expectedCredentialsByType.forEach((libsignalCredentialType, expectedCredentials) -> {
+      final ArchiveController.BackupAuthCredentialsResponse.CredentialType credentialType =
+          ArchiveController.BackupAuthCredentialsResponse.CredentialType.fromLibsignalType(libsignalCredentialType);
+      assertThat(credentialResponse.credentials().get(credentialType)).size().isEqualTo(expectedCredentials.size());
+      assertThat(credentialResponse.credentials().get(credentialType).getFirst().redemptionTime())
+          .isEqualTo(start.getEpochSecond());
+
+      for (int i = 0; i < expectedCredentials.size(); i++) {
+        assertThat(credentialResponse.credentials().get(credentialType).get(i).redemptionTime())
+            .isEqualTo(expectedCredentials.get(i).redemptionTime().getEpochSecond());
+
+        assertThat(credentialResponse.credentials().get(credentialType).get(i).credential())
+            .isEqualTo(expectedCredentials.get(i).credential().serialize());
+      }
+    });
   }
 
   public enum BadCredentialsType {MISSING_START, MISSING_END, MISSING_BOTH}
@@ -321,9 +354,9 @@ public class ArchiveControllerTest {
   @Test
   public void getBackupInfo() throws VerificationFailedException {
     final BackupAuthCredentialPresentation presentation = backupAuthTestUtil.getPresentation(
-        BackupLevel.MEDIA, backupKey, aci);
+        BackupLevel.PAID, messagesBackupKey, aci);
     when(backupManager.authenticateBackupUser(any(), any()))
-        .thenReturn(CompletableFuture.completedFuture(backupUser(presentation.getBackupId(), BackupLevel.MEDIA)));
+        .thenReturn(CompletableFuture.completedFuture(backupUser(presentation.getBackupId(), BackupCredentialType.MESSAGES, BackupLevel.PAID)));
     when(backupManager.backupInfo(any())).thenReturn(CompletableFuture.completedFuture(new BackupManager.BackupInfo(
         1, "myBackupDir", "myMediaDir", "filename", Optional.empty())));
     final ArchiveController.BackupInfoResponse response = resources.getJerseyTest()
@@ -341,9 +374,9 @@ public class ArchiveControllerTest {
   @Test
   public void putMediaBatchSuccess() throws VerificationFailedException {
     final BackupAuthCredentialPresentation presentation = backupAuthTestUtil.getPresentation(
-        BackupLevel.MEDIA, backupKey, aci);
+        BackupLevel.PAID, messagesBackupKey, aci);
     when(backupManager.authenticateBackupUser(any(), any()))
-        .thenReturn(CompletableFuture.completedFuture(backupUser(presentation.getBackupId(), BackupLevel.MEDIA)));
+        .thenReturn(CompletableFuture.completedFuture(backupUser(presentation.getBackupId(), BackupCredentialType.MESSAGES, BackupLevel.PAID)));
     final byte[][] mediaIds = new byte[][]{TestRandomUtil.nextBytes(15), TestRandomUtil.nextBytes(15)};
     when(backupManager.copyToBackup(any(), any()))
         .thenReturn(Flux.just(
@@ -357,20 +390,18 @@ public class ArchiveControllerTest {
         .header("X-Signal-ZK-Auth-Signature", "aaa")
         .put(Entity.json(new ArchiveController.CopyMediaBatchRequest(List.of(
             new ArchiveController.CopyMediaRequest(
-                new ArchiveController.RemoteAttachment(3, "abc"),
+                new RemoteAttachment(3, "abc"),
                 100,
                 mediaIds[0],
                 TestRandomUtil.nextBytes(32),
-                TestRandomUtil.nextBytes(32),
-                TestRandomUtil.nextBytes(16)),
+                TestRandomUtil.nextBytes(32)),
 
             new ArchiveController.CopyMediaRequest(
-                new ArchiveController.RemoteAttachment(3, "def"),
+                new RemoteAttachment(3, "def"),
                 200,
                 mediaIds[1],
                 TestRandomUtil.nextBytes(32),
-                TestRandomUtil.nextBytes(32),
-                TestRandomUtil.nextBytes(16))
+                TestRandomUtil.nextBytes(32))
         ))));
     assertThat(r.getStatus()).isEqualTo(207);
     final ArchiveController.CopyMediaBatchResponse copyResponse = r.readEntity(
@@ -388,9 +419,9 @@ public class ArchiveControllerTest {
   public void putMediaBatchPartialFailure() throws VerificationFailedException {
 
     final BackupAuthCredentialPresentation presentation = backupAuthTestUtil.getPresentation(
-        BackupLevel.MEDIA, backupKey, aci);
+        BackupLevel.PAID, messagesBackupKey, aci);
     when(backupManager.authenticateBackupUser(any(), any()))
-        .thenReturn(CompletableFuture.completedFuture(backupUser(presentation.getBackupId(), BackupLevel.MEDIA)));
+        .thenReturn(CompletableFuture.completedFuture(backupUser(presentation.getBackupId(), BackupCredentialType.MESSAGES, BackupLevel.PAID)));
 
     final byte[][] mediaIds = IntStream.range(0, 4).mapToObj(i -> TestRandomUtil.nextBytes(15)).toArray(byte[][]::new);
     when(backupManager.copyToBackup(any(), any()))
@@ -402,12 +433,11 @@ public class ArchiveControllerTest {
 
     final List<ArchiveController.CopyMediaRequest> copyRequests = Arrays.stream(mediaIds)
         .map(mediaId -> new ArchiveController.CopyMediaRequest(
-            new ArchiveController.RemoteAttachment(3, "abc"),
+            new RemoteAttachment(3, "abc"),
             100,
             mediaId,
             TestRandomUtil.nextBytes(32),
-            TestRandomUtil.nextBytes(32),
-            TestRandomUtil.nextBytes(16))
+            TestRandomUtil.nextBytes(32))
         ).toList();
 
     Response r = resources.getJerseyTest()
@@ -422,7 +452,7 @@ public class ArchiveControllerTest {
 
     assertThat(copyResponse.responses()).hasSize(4);
 
-    final ArchiveController.CopyMediaBatchResponse.Entry r1 = copyResponse.responses().get(0);
+    final ArchiveController.CopyMediaBatchResponse.Entry r1 = copyResponse.responses().getFirst();
     assertThat(r1.cdn()).isEqualTo(1);
     assertThat(r1.mediaId()).isEqualTo(mediaIds[0]);
     assertThat(r1.status()).isEqualTo(200);
@@ -447,9 +477,9 @@ public class ArchiveControllerTest {
   @Test
   public void copyMediaWithNegativeLength() throws VerificationFailedException {
     final BackupAuthCredentialPresentation presentation = backupAuthTestUtil.getPresentation(
-        BackupLevel.MEDIA, backupKey, aci);
+        BackupLevel.PAID, messagesBackupKey, aci);
     when(backupManager.authenticateBackupUser(any(), any()))
-        .thenReturn(CompletableFuture.completedFuture(backupUser(presentation.getBackupId(), BackupLevel.MEDIA)));
+        .thenReturn(CompletableFuture.completedFuture(backupUser(presentation.getBackupId(), BackupCredentialType.MESSAGES, BackupLevel.PAID)));
     final byte[][] mediaIds = new byte[][]{TestRandomUtil.nextBytes(15), TestRandomUtil.nextBytes(15)};
     final Response r = resources.getJerseyTest()
         .target("v1/archives/media/batch")
@@ -458,20 +488,18 @@ public class ArchiveControllerTest {
         .header("X-Signal-ZK-Auth-Signature", "aaa")
         .put(Entity.json(new ArchiveController.CopyMediaBatchRequest(List.of(
             new ArchiveController.CopyMediaRequest(
-                new ArchiveController.RemoteAttachment(3, "abc"),
+                new RemoteAttachment(3, "abc"),
                 1,
                 mediaIds[0],
                 TestRandomUtil.nextBytes(32),
-                TestRandomUtil.nextBytes(32),
-                TestRandomUtil.nextBytes(16)),
+                TestRandomUtil.nextBytes(32)),
 
             new ArchiveController.CopyMediaRequest(
-                new ArchiveController.RemoteAttachment(3, "def"),
+                new RemoteAttachment(3, "def"),
                 -1,
                 mediaIds[1],
                 TestRandomUtil.nextBytes(32),
-                TestRandomUtil.nextBytes(32),
-                TestRandomUtil.nextBytes(16))
+                TestRandomUtil.nextBytes(32))
         ))));
     assertThat(r.getStatus()).isEqualTo(422);
   }
@@ -482,9 +510,9 @@ public class ArchiveControllerTest {
       @CartesianTest.Values(booleans = {true, false}) final boolean cursorReturned)
       throws VerificationFailedException {
     final BackupAuthCredentialPresentation presentation = backupAuthTestUtil.getPresentation(
-        BackupLevel.MEDIA, backupKey, aci);
+        BackupLevel.PAID, messagesBackupKey, aci);
     when(backupManager.authenticateBackupUser(any(), any()))
-        .thenReturn(CompletableFuture.completedFuture(backupUser(presentation.getBackupId(), BackupLevel.MEDIA)));
+        .thenReturn(CompletableFuture.completedFuture(backupUser(presentation.getBackupId(), BackupCredentialType.MESSAGES, BackupLevel.PAID)));
 
     final byte[] mediaId = TestRandomUtil.nextBytes(15);
     final Optional<String> expectedCursor = cursorProvided ? Optional.of("myCursor") : Optional.empty();
@@ -516,10 +544,10 @@ public class ArchiveControllerTest {
 
   @Test
   public void delete() throws VerificationFailedException {
-    final BackupAuthCredentialPresentation presentation = backupAuthTestUtil.getPresentation(BackupLevel.MEDIA,
-        backupKey, aci);
+    final BackupAuthCredentialPresentation presentation = backupAuthTestUtil.getPresentation(BackupLevel.PAID,
+        messagesBackupKey, aci);
     when(backupManager.authenticateBackupUser(any(), any()))
-        .thenReturn(CompletableFuture.completedFuture(backupUser(presentation.getBackupId(), BackupLevel.MEDIA)));
+        .thenReturn(CompletableFuture.completedFuture(backupUser(presentation.getBackupId(), BackupCredentialType.MESSAGES, BackupLevel.PAID)));
 
     final ArchiveController.DeleteMedia deleteRequest = new ArchiveController.DeleteMedia(
         IntStream
@@ -541,11 +569,11 @@ public class ArchiveControllerTest {
   }
 
   @Test
-  public void mediaUploadForm() throws RateLimitExceededException, VerificationFailedException {
+  public void mediaUploadForm() throws VerificationFailedException {
     final BackupAuthCredentialPresentation presentation =
-        backupAuthTestUtil.getPresentation(BackupLevel.MEDIA, backupKey, aci);
+        backupAuthTestUtil.getPresentation(BackupLevel.PAID, messagesBackupKey, aci);
     when(backupManager.authenticateBackupUser(any(), any()))
-        .thenReturn(CompletableFuture.completedFuture(backupUser(presentation.getBackupId(), BackupLevel.MEDIA)));
+        .thenReturn(CompletableFuture.completedFuture(backupUser(presentation.getBackupId(), BackupCredentialType.MESSAGES, BackupLevel.PAID)));
     when(backupManager.createTemporaryAttachmentUploadDescriptor(any()))
         .thenReturn(CompletableFuture.completedFuture(
             new BackupUploadDescriptor(3, "abc", Map.of("k", "v"), "example.org")));
@@ -575,9 +603,9 @@ public class ArchiveControllerTest {
   @Test
   public void readAuth() throws VerificationFailedException {
     final BackupAuthCredentialPresentation presentation =
-        backupAuthTestUtil.getPresentation(BackupLevel.MEDIA, backupKey, aci);
+        backupAuthTestUtil.getPresentation(BackupLevel.PAID, messagesBackupKey, aci);
     when(backupManager.authenticateBackupUser(any(), any()))
-        .thenReturn(CompletableFuture.completedFuture(backupUser(presentation.getBackupId(), BackupLevel.MEDIA)));
+        .thenReturn(CompletableFuture.completedFuture(backupUser(presentation.getBackupId(), BackupCredentialType.MESSAGES, BackupLevel.PAID)));
     when(backupManager.generateReadAuth(any(), eq(3))).thenReturn(Map.of("key", "value"));
     final ArchiveController.ReadAuthResponse response = resources.getJerseyTest()
         .target("v1/archives/auth/read")
@@ -592,7 +620,7 @@ public class ArchiveControllerTest {
   @Test
   public void readAuthInvalidParam() throws VerificationFailedException {
     final BackupAuthCredentialPresentation presentation =
-        backupAuthTestUtil.getPresentation(BackupLevel.MEDIA, backupKey, aci);
+        backupAuthTestUtil.getPresentation(BackupLevel.PAID, messagesBackupKey, aci);
     Response response = resources.getJerseyTest()
         .target("v1/archives/auth/read")
         .request()
@@ -614,9 +642,9 @@ public class ArchiveControllerTest {
   @Test
   public void deleteEntireBackup() throws VerificationFailedException {
     final BackupAuthCredentialPresentation presentation =
-        backupAuthTestUtil.getPresentation(BackupLevel.MEDIA, backupKey, aci);
+        backupAuthTestUtil.getPresentation(BackupLevel.PAID, messagesBackupKey, aci);
     when(backupManager.authenticateBackupUser(any(), any()))
-        .thenReturn(CompletableFuture.completedFuture(backupUser(presentation.getBackupId(), BackupLevel.MEDIA)));
+        .thenReturn(CompletableFuture.completedFuture(backupUser(presentation.getBackupId(), BackupCredentialType.MESSAGES, BackupLevel.PAID)));
     when(backupManager.deleteEntireBackup(any())).thenReturn(CompletableFuture.completedFuture(null));
     Response response = resources.getJerseyTest()
         .target("v1/archives/")
@@ -630,25 +658,24 @@ public class ArchiveControllerTest {
   @Test
   public void invalidSourceAttachmentKey() throws VerificationFailedException {
     final BackupAuthCredentialPresentation presentation = backupAuthTestUtil.getPresentation(
-        BackupLevel.MEDIA, backupKey, aci);
+        BackupLevel.PAID, messagesBackupKey, aci);
     when(backupManager.authenticateBackupUser(any(), any()))
-        .thenReturn(CompletableFuture.completedFuture(backupUser(presentation.getBackupId(), BackupLevel.MEDIA)));
+        .thenReturn(CompletableFuture.completedFuture(backupUser(presentation.getBackupId(), BackupCredentialType.MESSAGES, BackupLevel.PAID)));
     final Response r = resources.getJerseyTest()
         .target("v1/archives/media")
         .request()
         .header("X-Signal-ZK-Auth", Base64.getEncoder().encodeToString(presentation.serialize()))
         .header("X-Signal-ZK-Auth-Signature", "aaa")
         .put(Entity.json(new ArchiveController.CopyMediaRequest(
-                new ArchiveController.RemoteAttachment(3, "invalid/urlBase64"),
-                100,
-                TestRandomUtil.nextBytes(15),
-                TestRandomUtil.nextBytes(32),
-                TestRandomUtil.nextBytes(32),
-                TestRandomUtil.nextBytes(16))));
+            new RemoteAttachment(3, "invalid/urlBase64"),
+            100,
+            TestRandomUtil.nextBytes(15),
+            TestRandomUtil.nextBytes(32),
+            TestRandomUtil.nextBytes(32))));
     assertThat(r.getStatus()).isEqualTo(422);
   }
 
-  private static AuthenticatedBackupUser backupUser(byte[] backupId, BackupLevel backupLevel) {
-    return new AuthenticatedBackupUser(backupId, backupLevel, "myBackupDir", "myMediaDir");
+  private static AuthenticatedBackupUser backupUser(final byte[] backupId, final BackupCredentialType credentialType, final BackupLevel backupLevel) {
+    return new AuthenticatedBackupUser(backupId, credentialType, backupLevel, "myBackupDir", "myMediaDir");
   }
 }

@@ -8,6 +8,7 @@ import static org.whispersystems.textsecuregcm.metrics.MetricsUtil.name;
 
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Metrics;
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -24,7 +25,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.whispersystems.textsecuregcm.entities.MessageProtos;
 import org.whispersystems.textsecuregcm.entities.MessageProtos.Envelope;
-import org.whispersystems.textsecuregcm.identity.ServiceIdentifier;
 import org.whispersystems.textsecuregcm.metrics.MetricsUtil;
 import org.whispersystems.textsecuregcm.util.Pair;
 import reactor.core.observability.micrometer.Micrometer;
@@ -60,14 +60,29 @@ public class MessagesManager {
     this.messageDeletionExecutor = messageDeletionExecutor;
   }
 
-  public void insert(UUID destinationUuid, byte destinationDevice, Envelope message) {
+  /**
+   * Inserts a message into a target device's message queue and notifies registered listeners that a new message is
+   * available.
+   *
+   * @param destinationUuid the account identifier for the destination queue
+   * @param destinationDeviceId the device ID for the destination queue
+   * @param message the message to insert into the queue
+   *
+   * @return {@code true} if the destination device is "present" (i.e. has an active event listener) or {@code false}
+   * otherwise
+   *
+   * @see org.whispersystems.textsecuregcm.push.WebSocketConnectionEventManager
+   */
+  public boolean insert(final UUID destinationUuid, final byte destinationDeviceId, final Envelope message) {
     final UUID messageGuid = UUID.randomUUID();
 
-    messagesCache.insert(messageGuid, destinationUuid, destinationDevice, message);
+    final boolean destinationPresent = messagesCache.insert(messageGuid, destinationUuid, destinationDeviceId, message);
 
     if (message.hasSourceServiceId() && !destinationUuid.toString().equals(message.getSourceServiceId())) {
       reportMessageManager.store(message.getSourceServiceId(), messageGuid);
     }
+
+    return destinationPresent;
   }
 
   public CompletableFuture<Boolean> mayHavePersistedMessages(final UUID destinationUuid, final Device destinationDevice) {
@@ -128,10 +143,6 @@ public class MessagesManager {
         .tap(Micrometer.metrics(Metrics.globalRegistry));
   }
 
-  public Mono<Long> getEarliestUndeliveredTimestampForDevice(UUID destinationUuid, Device destinationDevice) {
-    return Mono.from(messagesDynamoDb.load(destinationUuid, destinationDevice, 1)).map(Envelope::getServerTimestamp);
-  }
-
   public CompletableFuture<Void> clear(UUID destinationUuid) {
     return messagesCache.clear(destinationUuid);
   }
@@ -190,15 +201,14 @@ public class MessagesManager {
     return messagesRemovedFromCache;
   }
 
-  public void addMessageAvailabilityListener(
-      final UUID destinationUuid,
-      final byte destinationDeviceId,
-      final MessageAvailabilityListener listener) {
-    messagesCache.addMessageAvailabilityListener(destinationUuid, destinationDeviceId, listener);
-  }
-
-  public void removeMessageAvailabilityListener(final MessageAvailabilityListener listener) {
-    messagesCache.removeMessageAvailabilityListener(listener);
+  public CompletableFuture<Optional<Instant>> getEarliestUndeliveredTimestampForDevice(UUID destinationUuid, Device destinationDevice) {
+    // If there's any message in the persisted layer, return the oldest
+    return Mono.from(messagesDynamoDb.load(destinationUuid, destinationDevice, 1)).map(Envelope::getServerTimestamp)
+        // If not, return the oldest message in the cache
+        .switchIfEmpty(messagesCache.getEarliestUndeliveredTimestamp(destinationUuid, destinationDevice.getId()))
+        .map(epochMilli -> Optional.of(Instant.ofEpochMilli(epochMilli)))
+        .switchIfEmpty(Mono.just(Optional.empty()))
+        .toFuture();
   }
 
   /**
@@ -210,16 +220,5 @@ public class MessagesManager {
   public byte[] insertSharedMultiRecipientMessagePayload(
       final SealedSenderMultiRecipientMessage sealedSenderMultiRecipientMessage) {
     return messagesCache.insertSharedMultiRecipientMessagePayload(sealedSenderMultiRecipientMessage);
-  }
-
-  /**
-   * Removes the recipient's view from shared MRM data if necessary
-   */
-  public void removeRecipientViewFromMrmData(final byte destinationDeviceId, final Envelope message) {
-    if (message.hasSharedMrmKey()) {
-      messagesCache.removeRecipientViewFromMrmData(List.of(message.getSharedMrmKey().toByteArray()),
-          ServiceIdentifier.valueOf(message.getDestinationServiceId()),
-          destinationDeviceId);
-    }
   }
 }

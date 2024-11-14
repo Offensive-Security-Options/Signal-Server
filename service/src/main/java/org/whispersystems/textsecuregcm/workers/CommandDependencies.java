@@ -23,6 +23,7 @@ import org.signal.libsignal.zkgroup.GenericServerSecretParams;
 import org.signal.libsignal.zkgroup.InvalidInputException;
 import org.whispersystems.textsecuregcm.WhisperServerConfiguration;
 import org.whispersystems.textsecuregcm.attachments.TusAttachmentGenerator;
+import org.whispersystems.textsecuregcm.auth.DisconnectionRequestManager;
 import org.whispersystems.textsecuregcm.auth.ExternalServiceCredentialsGenerator;
 import org.whispersystems.textsecuregcm.backup.BackupManager;
 import org.whispersystems.textsecuregcm.backup.BackupsDb;
@@ -35,12 +36,12 @@ import org.whispersystems.textsecuregcm.experiment.PushNotificationExperimentSam
 import org.whispersystems.textsecuregcm.limits.RateLimiters;
 import org.whispersystems.textsecuregcm.metrics.MicrometerAwsSdkMetricPublisher;
 import org.whispersystems.textsecuregcm.push.APNSender;
-import org.whispersystems.textsecuregcm.push.PushNotificationScheduler;
-import org.whispersystems.textsecuregcm.push.ClientPresenceManager;
 import org.whispersystems.textsecuregcm.push.FcmSender;
+import org.whispersystems.textsecuregcm.push.WebSocketConnectionEventManager;
 import org.whispersystems.textsecuregcm.push.PushNotificationManager;
-import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClusterClient;
+import org.whispersystems.textsecuregcm.push.PushNotificationScheduler;
 import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClient;
+import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClusterClient;
 import org.whispersystems.textsecuregcm.securestorage.SecureStorageClient;
 import org.whispersystems.textsecuregcm.securevaluerecovery.SecureValueRecovery2Client;
 import org.whispersystems.textsecuregcm.storage.AccountLockManager;
@@ -76,7 +77,6 @@ record CommandDependencies(
     ReportMessageManager reportMessageManager,
     MessagesCache messagesCache,
     MessagesManager messagesManager,
-    ClientPresenceManager clientPresenceManager,
     KeysManager keysManager,
     APNSender apnSender,
     FcmSender fcmSender,
@@ -103,8 +103,9 @@ record CommandDependencies(
     ScheduledExecutorService dynamicConfigurationExecutor = environment.lifecycle()
         .scheduledExecutorService(name(name, "dynamicConfiguration-%d")).threads(1).build();
 
-    DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager = configuration.getAppConfig().build(
-        DynamicConfiguration.class, dynamicConfigurationExecutor, awsCredentialsProvider);
+    DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager =
+        new DynamicConfigurationManager<>(
+            configuration.getDynamicConfig().build(awsCredentialsProvider, dynamicConfigurationExecutor), DynamicConfiguration.class);
     dynamicConfigurationManager.start();
 
     final ClientResources.Builder redisClientResourcesBuilder = ClientResources.builder();
@@ -116,12 +117,8 @@ record CommandDependencies(
     FaultTolerantRedisClient pubsubClient =
         configuration.getRedisPubSubConfiguration().build("pubsub", redisClientResourcesBuilder.build());
 
-    ScheduledExecutorService recurringJobExecutor = environment.lifecycle()
-        .scheduledExecutorService(name(name, "recurringJob-%d")).threads(2).build();
     Scheduler messageDeliveryScheduler = Schedulers.fromExecutorService(
         environment.lifecycle().executorService("messageDelivery").minThreads(4).maxThreads(4).build());
-    ExecutorService keyspaceNotificationDispatchExecutor = environment.lifecycle()
-        .executorService(name(name, "keyspaceNotification-%d")).minThreads(4).maxThreads(4).build();
     ExecutorService messageDeletionExecutor = environment.lifecycle()
         .executorService(name(name, "messageDeletion-%d")).minThreads(4).maxThreads(4).build();
     ExecutorService secureValueRecoveryServiceExecutor = environment.lifecycle()
@@ -130,8 +127,6 @@ record CommandDependencies(
         .executorService(name(name, "storageService-%d")).maxThreads(8).minThreads(8).build();
     ExecutorService accountLockExecutor = environment.lifecycle()
         .executorService(name(name, "accountLock-%d")).minThreads(8).maxThreads(8).build();
-    ExecutorService clientPresenceExecutor = environment.lifecycle()
-        .executorService(name(name, "clientPresence-%d")).minThreads(8).maxThreads(8).build();
     ExecutorService remoteStorageHttpExecutor = environment.lifecycle()
         .executorService(name(name, "remoteStorage-%d"))
         .minThreads(0).maxThreads(Integer.MAX_VALUE).workQueue(new SynchronousQueue<>())
@@ -140,6 +135,10 @@ record CommandDependencies(
         .maxThreads(1).minThreads(1).build();
     ExecutorService fcmSenderExecutor = environment.lifecycle().executorService(name(name, "fcmSender-%d"))
         .maxThreads(16).minThreads(16).build();
+    ExecutorService clientEventExecutor = environment.lifecycle()
+        .virtualExecutorService(name(name, "clientEvent-%d"));
+    ExecutorService disconnectionRequestListenerExecutor = environment.lifecycle()
+        .virtualExecutorService(name(name, "disconnectionRequest-%d"));
 
     ScheduledExecutorService secureValueRecoveryServiceRetryExecutor = environment.lifecycle()
         .scheduledExecutorService(name(name, "secureValueRecoveryServiceRetry-%d")).threads(1).build();
@@ -147,6 +146,8 @@ record CommandDependencies(
         .scheduledExecutorService(name(name, "remoteStorageRetry-%d")).threads(1).build();
     ScheduledExecutorService storageServiceRetryExecutor = environment.lifecycle()
         .scheduledExecutorService(name(name, "storageServiceRetry-%d")).threads(1).build();
+    ScheduledExecutorService messagePollExecutor = environment.lifecycle()
+        .scheduledExecutorService(name(name, "messagePollExecutor-%d")).threads(1).build();
 
     ExternalServiceCredentialsGenerator storageCredentialsGenerator = SecureStorageController.credentialsGenerator(
         configuration.getSecureStorageServiceConfiguration());
@@ -201,8 +202,6 @@ record CommandDependencies(
         messageDeletionExecutor);
     FaultTolerantRedisClusterClient messagesCluster = configuration.getMessageCacheConfiguration()
         .getRedisClusterConfiguration().build("messages", redisClientResourcesBuilder);
-    FaultTolerantRedisClusterClient clientPresenceCluster = configuration.getClientPresenceClusterConfiguration()
-        .build("client_presence", redisClientResourcesBuilder);
     FaultTolerantRedisClusterClient rateLimitersCluster = configuration.getRateLimitersCluster().build("rate_limiters",
         redisClientResourcesBuilder);
     SecureValueRecovery2Client secureValueRecovery2Client = new SecureValueRecovery2Client(
@@ -211,9 +210,8 @@ record CommandDependencies(
         configuration.getSvr2Configuration());
     SecureStorageClient secureStorageClient = new SecureStorageClient(storageCredentialsGenerator,
         storageServiceExecutor, storageServiceRetryExecutor, configuration.getSecureStorageServiceConfiguration());
-    ClientPresenceManager clientPresenceManager = new ClientPresenceManager(clientPresenceCluster,
-        recurringJobExecutor, keyspaceNotificationDispatchExecutor);
-    MessagesCache messagesCache = new MessagesCache(messagesCluster, keyspaceNotificationDispatchExecutor,
+    DisconnectionRequestManager disconnectionRequestManager = new DisconnectionRequestManager(pubsubClient, disconnectionRequestListenerExecutor);
+    MessagesCache messagesCache = new MessagesCache(messagesCluster,
         messageDeliveryScheduler, messageDeletionExecutor, Clock.systemUTC(), dynamicConfigurationManager);
     ProfilesManager profilesManager = new ProfilesManager(profiles, cacheCluster);
     ReportMessageDynamoDb reportMessageDynamoDb = new ReportMessageDynamoDb(dynamoDbClient,
@@ -229,8 +227,8 @@ record CommandDependencies(
         new ClientPublicKeysManager(clientPublicKeys, accountLockManager, accountLockExecutor);
     AccountsManager accountsManager = new AccountsManager(accounts, phoneNumberIdentifiers, cacheCluster,
         pubsubClient, accountLockManager, keys, messagesManager, profilesManager,
-        secureStorageClient, secureValueRecovery2Client, clientPresenceManager,
-        registrationRecoveryPasswordsManager, clientPublicKeysManager, accountLockExecutor, clientPresenceExecutor,
+        secureStorageClient, secureValueRecovery2Client, disconnectionRequestManager,
+        registrationRecoveryPasswordsManager, clientPublicKeysManager, accountLockExecutor, messagePollExecutor,
         clock, configuration.getLinkDeviceSecretConfiguration().secret().value(), dynamicConfigurationManager);
     RateLimiters rateLimiters = RateLimiters.createAndValidate(configuration.getLimitsConfiguration(),
         dynamicConfigurationManager, rateLimitersCluster);
@@ -265,9 +263,12 @@ record CommandDependencies(
             configuration.getDynamoDbTables().getPushNotificationExperimentSamples().getTableName(),
             Clock.systemUTC());
 
+    WebSocketConnectionEventManager webSocketConnectionEventManager =
+        new WebSocketConnectionEventManager(accountsManager, pushNotificationManager, messagesCluster, clientEventExecutor);
+
     environment.lifecycle().manage(apnSender);
-    environment.lifecycle().manage(messagesCache);
-    environment.lifecycle().manage(clientPresenceManager);
+    environment.lifecycle().manage(disconnectionRequestManager);
+    environment.lifecycle().manage(webSocketConnectionEventManager);
     environment.lifecycle().manage(new ManagedAwsCrt());
 
     return new CommandDependencies(
@@ -276,7 +277,6 @@ record CommandDependencies(
         reportMessageManager,
         messagesCache,
         messagesManager,
-        clientPresenceManager,
         keys,
         apnSender,
         fcmSender,

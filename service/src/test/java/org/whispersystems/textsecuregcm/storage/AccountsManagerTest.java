@@ -49,14 +49,17 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import javax.crypto.spec.SecretKeySpec;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -68,6 +71,7 @@ import org.mockito.stubbing.Answer;
 import org.signal.libsignal.protocol.IdentityKey;
 import org.signal.libsignal.protocol.ecc.Curve;
 import org.signal.libsignal.protocol.ecc.ECKeyPair;
+import org.whispersystems.textsecuregcm.auth.DisconnectionRequestManager;
 import org.whispersystems.textsecuregcm.auth.UnidentifiedAccessUtil;
 import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfiguration;
 import org.whispersystems.textsecuregcm.controllers.MismatchedDevicesException;
@@ -77,14 +81,12 @@ import org.whispersystems.textsecuregcm.entities.KEMSignedPreKey;
 import org.whispersystems.textsecuregcm.identity.AciServiceIdentifier;
 import org.whispersystems.textsecuregcm.identity.IdentityType;
 import org.whispersystems.textsecuregcm.identity.PniServiceIdentifier;
-import org.whispersystems.textsecuregcm.push.ClientPresenceManager;
-import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClusterClient;
 import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClient;
+import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClusterClient;
 import org.whispersystems.textsecuregcm.securestorage.SecureStorageClient;
 import org.whispersystems.textsecuregcm.securevaluerecovery.SecureValueRecovery2Client;
 import org.whispersystems.textsecuregcm.securevaluerecovery.SecureValueRecoveryException;
 import org.whispersystems.textsecuregcm.storage.AccountsManager.UsernameReservation;
-import org.whispersystems.textsecuregcm.storage.Device.DeviceCapabilities;
 import org.whispersystems.textsecuregcm.tests.util.AccountsHelper;
 import org.whispersystems.textsecuregcm.tests.util.DevicesHelper;
 import org.whispersystems.textsecuregcm.tests.util.KeysHelper;
@@ -95,7 +97,6 @@ import org.whispersystems.textsecuregcm.util.CompletableFutureTestUtil;
 import org.whispersystems.textsecuregcm.util.Pair;
 import org.whispersystems.textsecuregcm.util.TestClock;
 import org.whispersystems.textsecuregcm.util.TestRandomUtil;
-import javax.crypto.spec.SecretKeySpec;
 
 @Timeout(value = 10, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
 class AccountsManagerTest {
@@ -117,7 +118,7 @@ class AccountsManagerTest {
   private KeysManager keysManager;
   private MessagesManager messagesManager;
   private ProfilesManager profilesManager;
-  private ClientPresenceManager clientPresenceManager;
+  private DisconnectionRequestManager disconnectionRequestManager;
   private ClientPublicKeysManager clientPublicKeysManager;
 
   private Map<String, UUID> phoneNumberIdentifiersByE164;
@@ -152,18 +153,9 @@ class AccountsManagerTest {
     keysManager = mock(KeysManager.class);
     messagesManager = mock(MessagesManager.class);
     profilesManager = mock(ProfilesManager.class);
-    clientPresenceManager = mock(ClientPresenceManager.class);
+    disconnectionRequestManager = mock(DisconnectionRequestManager.class);
     clientPublicKeysManager = mock(ClientPublicKeysManager.class);
     dynamicConfiguration = mock(DynamicConfiguration.class);
-
-    final Executor clientPresenceExecutor = mock(Executor.class);
-
-    doAnswer(invocation -> {
-      final Runnable runnable = invocation.getArgument(0);
-      runnable.run();
-
-      return null;
-    }).when(clientPresenceExecutor).execute(any());
 
     //noinspection unchecked
     asyncCommands = mock(RedisAsyncCommands.class);
@@ -247,6 +239,8 @@ class AccountsManagerTest {
         .stringAsyncCommands(asyncClusterCommands)
         .build();
 
+    when(disconnectionRequestManager.requestDisconnection(any())).thenReturn(CompletableFuture.completedFuture(null));
+
     accountsManager = new AccountsManager(
         accounts,
         phoneNumberIdentifiers,
@@ -258,11 +252,11 @@ class AccountsManagerTest {
         profilesManager,
         storageClient,
         svr2Client,
-        clientPresenceManager,
+        disconnectionRequestManager,
         registrationRecoveryPasswordsManager,
         clientPublicKeysManager,
         mock(Executor.class),
-        clientPresenceExecutor,
+        mock(ScheduledExecutorService.class),
         CLOCK,
         LINK_DEVICE_SECRET,
         dynamicConfigurationManager);
@@ -798,7 +792,7 @@ class AccountsManagerTest {
     verify(keysManager, times(2)).deleteSingleUsePreKeys(account.getUuid(), linkedDevice.getId());
     verify(keysManager).buildWriteItemsForRemovedDevice(account.getUuid(), account.getPhoneNumberIdentifier(), linkedDevice.getId());
     verify(clientPublicKeysManager).buildTransactWriteItemForDeletion(account.getUuid(), linkedDevice.getId());
-    verify(clientPresenceManager).disconnectPresence(account.getUuid(), linkedDevice.getId());
+    verify(disconnectionRequestManager).requestDisconnection(account.getUuid(), List.of(linkedDevice.getId()));
   }
 
   @Test
@@ -816,7 +810,7 @@ class AccountsManagerTest {
     assertDoesNotThrow(account::getPrimaryDevice);
     verify(messagesManager, never()).clear(any(), anyByte());
     verify(keysManager, never()).deleteSingleUsePreKeys(any(), anyByte());
-    verify(clientPresenceManager, never()).disconnectPresence(any(), anyByte());
+    verify(disconnectionRequestManager, never()).requestDisconnection(any(), any());
   }
 
   @Test
@@ -885,7 +879,7 @@ class AccountsManagerTest {
     verify(keysManager, times(2)).deleteSingleUsePreKeys(phoneNumberIdentifiersByE164.get(e164));
     verify(messagesManager, times(2)).clear(existingUuid);
     verify(profilesManager, times(2)).deleteAll(existingUuid);
-    verify(clientPresenceManager).disconnectAllPresencesForUuid(existingUuid);
+    verify(disconnectionRequestManager).requestDisconnection(existingUuid);
   }
 
   @Test
@@ -930,11 +924,11 @@ class AccountsManagerTest {
   @ValueSource(booleans = {true, false})
   void testCreateWithStorageCapability(final boolean hasStorage) throws InterruptedException {
     final AccountAttributes attributes = new AccountAttributes(false, 1, 2, null, null,
-            true, new DeviceCapabilities(hasStorage, false, false, false));
+            true, hasStorage ? Set.of(DeviceCapability.STORAGE) : Set.of());
 
     final Account account = createAccount("+18005550123", attributes);
 
-    assertEquals(hasStorage, account.isStorageSupported());
+    assertEquals(hasStorage, account.hasCapability(DeviceCapability.STORAGE));
   }
 
   @Test
@@ -955,7 +949,7 @@ class AccountsManagerTest {
     final byte[] deviceNameCiphertext = "device-name".getBytes(StandardCharsets.UTF_8);
     final String password = "password";
     final String signalAgent = "OWT";
-    final DeviceCapabilities deviceCapabilities = new DeviceCapabilities(true, true, false, false);
+    final Set<DeviceCapability> deviceCapabilities = Set.of();
     final int aciRegistrationId = 17;
     final int pniRegistrationId = 19;
     final ECSignedPreKey aciSignedPreKey = KeysHelper.signedECPreKey(1, aciKeyPair);
@@ -1005,7 +999,7 @@ class AccountsManagerTest {
     assertEquals(deviceNameCiphertext, device.getName());
     assertTrue(device.getAuthTokenHash().verify(password));
     assertEquals(signalAgent, device.getUserAgent());
-    assertEquals(deviceCapabilities, device.getCapabilities());
+    assertEquals(Collections.emptySet(), device.getCapabilities());
     assertEquals(aciRegistrationId, device.getRegistrationId());
     assertEquals(pniRegistrationId, device.getPhoneNumberIdentityRegistrationId().getAsInt());
     assertTrue(device.getFetchesMessages());
@@ -1535,6 +1529,21 @@ class AccountsManagerTest {
     final Account account = AccountsHelper.generateTestAccount("+18005551234", UUID.randomUUID(), UUID.randomUUID(), new ArrayList<>(), new byte[UnidentifiedAccessUtil.UNIDENTIFIED_ACCESS_KEY_LENGTH]);
 
     assertThrows(AssertionError.class, () -> accountsManager.update(account, a -> a.setUsernameHash(USERNAME_HASH_1)));
+  }
+
+  @Test
+  void testOnlyPrimaryCanWaitForDeviceLinked() {
+    final Device primaryDevice = new Device();
+    primaryDevice.setId(Device.PRIMARY_ID);
+
+    final Device linkedDevice = new Device();
+    linkedDevice.setId((byte) (Device.PRIMARY_ID + 1));
+
+    final Account account = AccountsHelper.generateTestAccount("+14152222222", List.of(primaryDevice, linkedDevice));
+
+    assertThrows(IllegalArgumentException.class,
+        () -> accountsManager.waitForNewLinkedDevice(account.getUuid(), linkedDevice, "", Duration.ofSeconds(1)));
+
   }
 
   @Test

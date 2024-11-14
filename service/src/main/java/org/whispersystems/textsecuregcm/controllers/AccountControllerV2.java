@@ -17,25 +17,25 @@ import io.swagger.v3.oas.annotations.headers.Header;
 import io.swagger.v3.oas.annotations.media.Content;
 import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotNull;
+import jakarta.ws.rs.BadRequestException;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.ForbiddenException;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.HeaderParam;
+import jakarta.ws.rs.PUT;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.WebApplicationException;
+import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.core.Context;
+import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
 import java.time.Instant;
 import java.util.Optional;
 import java.util.UUID;
 import javax.annotation.Nullable;
-import javax.validation.Valid;
-import javax.validation.constraints.NotNull;
-import javax.ws.rs.BadRequestException;
-import javax.ws.rs.Consumes;
-import javax.ws.rs.ForbiddenException;
-import javax.ws.rs.GET;
-import javax.ws.rs.HeaderParam;
-import javax.ws.rs.PUT;
-import javax.ws.rs.Path;
-import javax.ws.rs.Produces;
-import javax.ws.rs.WebApplicationException;
-import javax.ws.rs.container.ContainerRequestContext;
-import javax.ws.rs.core.Context;
-import javax.ws.rs.core.MediaType;
-import javax.ws.rs.core.Response;
 import org.whispersystems.textsecuregcm.auth.AuthenticatedDevice;
 import org.whispersystems.textsecuregcm.auth.ChangesPhoneNumber;
 import org.whispersystems.textsecuregcm.auth.PhoneVerificationTokenManager;
@@ -54,6 +54,7 @@ import org.whispersystems.textsecuregcm.metrics.UserAgentTagUtil;
 import org.whispersystems.textsecuregcm.storage.Account;
 import org.whispersystems.textsecuregcm.storage.AccountsManager;
 import org.whispersystems.textsecuregcm.storage.ChangeNumberManager;
+import org.whispersystems.textsecuregcm.storage.DeviceCapability;
 import org.whispersystems.websocket.auth.Mutable;
 import org.whispersystems.websocket.auth.ReadOnly;
 
@@ -151,7 +152,7 @@ public class AccountControllerV2 {
           updatedAccount.getPhoneNumberIdentifier(),
           updatedAccount.getUsernameHash().orElse(null),
           updatedAccount.getUsernameLinkHandle(),
-          updatedAccount.isStorageSupported());
+          updatedAccount.hasCapability(DeviceCapability.STORAGE));
     } catch (MismatchedDevicesException e) {
       throw new WebApplicationException(Response.status(409)
           .type(MediaType.APPLICATION_JSON_TYPE)
@@ -210,7 +211,7 @@ public class AccountControllerV2 {
           updatedAccount.getPhoneNumberIdentifier(),
           updatedAccount.getUsernameHash().orElse(null),
           updatedAccount.getUsernameLinkHandle(),
-          updatedAccount.isStorageSupported());
+          updatedAccount.hasCapability(DeviceCapability.STORAGE));
     } catch (MismatchedDevicesException e) {
       throw new WebApplicationException(Response.status(409)
           .type(MediaType.APPLICATION_JSON_TYPE)
